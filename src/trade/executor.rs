@@ -13,7 +13,7 @@ const DEFAULT_TRADE_DB: &str = "trade.db";
 const DEFAULT_PLAYERS_DB: &str = "players.db";
 const DEFAULT_POOL: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE";
 const DEFAULT_USDC_UI: &str = "1";
-const DEFAULT_SLIPPAGE_BPS: u16 = 0;
+const DEFAULT_SLIPPAGE_BPS: u16 = 10_000;
 const DEFAULT_POLL_MS: u64 = 1000;
 const EVENT_BATCH_LIMIT: i64 = 200;
 
