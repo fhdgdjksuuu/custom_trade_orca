@@ -21,7 +21,7 @@ use solana_keypair::Keypair;
 use solana_program_pack::Pack;
 use solana_pubkey::Pubkey;
 use solana_rpc_client_api::config::{
-    RpcSimulateTransactionAccountsConfig, RpcSimulateTransactionConfig,
+    RpcSendTransactionConfig, RpcSimulateTransactionAccountsConfig, RpcSimulateTransactionConfig,
 };
 use solana_rpc_client_api::request::TokenAccountsFilter;
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
@@ -65,6 +65,10 @@ impl ExecMode {
             ExecMode::Simulate => "SIM",
         }
     }
+}
+
+fn trade_commitment() -> CommitmentConfig {
+    CommitmentConfig::confirmed()
 }
 
 impl TradeDb {
@@ -979,7 +983,7 @@ async fn build_transaction_with_fee(
     mode: ExecMode,
 ) -> Result<(Transaction, u64, u64)> {
     let (blockhash, last_valid_block_height) = rpc
-        .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
+        .get_latest_blockhash_with_commitment(trade_commitment())
         .await
         .context("get_latest_blockhash_with_commitment")?;
 
@@ -1016,73 +1020,112 @@ async fn execute_tx(
     tx: &Transaction,
     mode: ExecMode,
     simulate_addresses: &[Pubkey],
+    last_valid_block_height: u64,
 ) -> Result<TxExecution> {
-    match mode {
-        ExecMode::Live => {
-            let sig = rpc
-                .send_and_confirm_transaction(tx)
-                .await
-                .context("send_and_confirm_transaction")?;
-            Ok(TxExecution {
-                signature: sig,
-                simulated: None,
-            })
+    let commitment = trade_commitment();
+    let addresses: Vec<String> = simulate_addresses.iter().map(|p| p.to_string()).collect();
+    let sim_cfg = RpcSimulateTransactionConfig {
+        sig_verify: true,
+        commitment: Some(commitment),
+        replace_recent_blockhash: false,
+        accounts: Some(RpcSimulateTransactionAccountsConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            addresses,
+        }),
+        ..RpcSimulateTransactionConfig::default()
+    };
+    let sim = rpc
+        .simulate_transaction_with_config(tx, sim_cfg)
+        .await
+        .context("simulate_transaction_with_config")?;
+    if let Some(err) = sim.value.err.clone() {
+        eprintln!("❌ Симуляция транзакции: ошибка {err:?}");
+        if let Some(units) = sim.value.units_consumed {
+            eprintln!("⚙️ Потрачено вычислительных единиц: {units}");
         }
-        ExecMode::Simulate => {
-            let addresses: Vec<String> = simulate_addresses.iter().map(|p| p.to_string()).collect();
-            let config = RpcSimulateTransactionConfig {
-                sig_verify: false,
-                replace_recent_blockhash: true,
-                accounts: Some(RpcSimulateTransactionAccountsConfig {
-                    encoding: Some(UiAccountEncoding::Base64),
-                    addresses,
-                }),
-                ..RpcSimulateTransactionConfig::default()
-            };
-            let res = rpc
-                .simulate_transaction_with_config(tx, config)
-                .await
-                .context("simulate_transaction_with_config")?;
-            if let Some(err) = res.value.err.clone() {
-                eprintln!("❌ Симуляция транзакции: ошибка {err:?}");
-                if let Some(units) = res.value.units_consumed {
-                    eprintln!("⚙️ Потрачено вычислительных единиц: {units}");
-                }
-                match &res.value.logs {
-                    Some(logs) if !logs.is_empty() => {
-                        eprintln!("📜 Логи инструкций симуляции:");
-                        for line in logs {
-                            eprintln!("📜 {line}");
-                        }
-                    }
-                    _ => {
-                        eprintln!("⚠️ Логи симуляции отсутствуют.");
-                    }
-                }
-                return Err(anyhow!("simulateTransaction error: {err:?}"));
-            }
-            println!("🧪 Симуляция транзакции: успешно.");
-            if let Some(units) = res.value.units_consumed {
-                println!("⚙️ Потрачено вычислительных единиц: {units}");
-            }
-            match &res.value.logs {
-                Some(logs) if !logs.is_empty() => {
-                    println!("📜 Логи инструкций симуляции:");
-                    for line in logs {
-                        println!("📜 {line}");
-                    }
-                }
-                _ => {
-                    println!("⚠️ Логи симуляции отсутствуют.");
+        match &sim.value.logs {
+            Some(logs) if !logs.is_empty() => {
+                eprintln!("📑 Логи инструкций симуляции:");
+                for line in logs {
+                    eprintln!("📑 {line}");
                 }
             }
-            let sig = tx.signatures.get(0).cloned().unwrap_or_default();
-            Ok(TxExecution {
-                signature: sig,
-                simulated: Some(res.value),
-            })
+            _ => {
+                eprintln!("⚠️ Логи симуляции отсутствуют.");
+            }
+        }
+        return Err(anyhow!("simulateTransaction error: {err:?}"));
+    }
+    println!("🧪 Симуляция транзакции: успешно.");
+    if let Some(units) = sim.value.units_consumed {
+        println!("⚙️ Потрачено вычислительных единиц: {units}");
+    }
+    match &sim.value.logs {
+        Some(logs) if !logs.is_empty() => {
+            println!("📑 Логи инструкций симуляции:");
+            for line in logs {
+                println!("📑 {line}");
+            }
+        }
+        _ => {
+            println!("⚠️ Логи симуляции отсутствуют.");
         }
     }
+
+    let sim_sig = tx.signatures.get(0).cloned().unwrap_or_default();
+
+    if mode == ExecMode::Simulate {
+        return Ok(TxExecution {
+            signature: sim_sig,
+            simulated: Some(sim.value),
+        });
+    }
+
+    let send_cfg = RpcSendTransactionConfig {
+        skip_preflight: true,
+        preflight_commitment: Some(commitment.commitment),
+        ..RpcSendTransactionConfig::default()
+    };
+    let sig = rpc
+        .send_transaction_with_config(tx, send_cfg)
+        .await
+        .context("send_transaction_with_config")?;
+
+    loop {
+        let status = rpc
+            .get_signature_statuses_with_history(&[sig])
+            .await
+            .context("get_signature_statuses_with_history")?
+            .value
+            .get(0)
+            .cloned()
+            .unwrap_or(None);
+        if let Some(status) = status {
+            if let Some(err) = status.err {
+                return Err(anyhow!("tx err: {err:?}"));
+            }
+        }
+        let confirmed = rpc
+            .confirm_transaction_with_commitment(&sig, commitment)
+            .await
+            .context("confirm_transaction_with_commitment")?
+            .value;
+        if confirmed {
+            break;
+        }
+        let current_height = rpc.get_block_height().await.context("get_block_height")?;
+        if current_height > last_valid_block_height {
+            return Err(anyhow!(
+                "tx not confirmed before last_valid_block_height={last_valid_block_height}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(TxExecution {
+        signature: sig,
+        simulated: Some(sim.value),
+    })
 }
 
 async fn rent_budget_for_atas(rpc: &RpcClient, atas: &[Pubkey]) -> Result<u64> {
@@ -1260,7 +1303,9 @@ async fn swap_core(
         signer_refs.push(kp);
     }
 
-    let recent_blockhash = rpc.get_latest_blockhash().await?;
+    let (recent_blockhash, last_valid_block_height) = rpc
+        .get_latest_blockhash_with_commitment(trade_commitment())
+        .await?;
     let tx = Transaction::new_signed_with_payer(
         &ixs,
         Some(&payer.pubkey()),
@@ -1268,7 +1313,7 @@ async fn swap_core(
         recent_blockhash,
     );
 
-    let exec = execute_tx(&rpc, &tx, ExecMode::Live, &[]).await?;
+    let exec = execute_tx(&rpc, &tx, ExecMode::Live, &[], last_valid_block_height).await?;
     Ok(exec.signature)
 }
 
@@ -1335,7 +1380,7 @@ impl Trader {
         mode: ExecMode,
         db_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        let rpc = RpcClient::new(rpc_url.to_string());
+        let rpc = RpcClient::new_with_commitment(rpc_url.to_string(), trade_commitment());
         let db = TradeDb::new(db_path.as_ref())?;
         Ok(Self {
             rpc,
@@ -1561,7 +1606,15 @@ impl Trader {
             (Vec::new(), HashSet::new())
         };
 
-        let exec = match execute_tx(rpc, &transaction, self.mode, &simulate_addresses).await {
+        let exec = match execute_tx(
+            rpc,
+            &transaction,
+            self.mode,
+            &simulate_addresses,
+            last_valid_block_height,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 let err_msg = e.to_string();
@@ -1914,7 +1967,15 @@ impl Trader {
             (Vec::new(), HashSet::new())
         };
 
-        let exec = match execute_tx(rpc, &transaction, self.mode, &simulate_addresses).await {
+        let exec = match execute_tx(
+            rpc,
+            &transaction,
+            self.mode,
+            &simulate_addresses,
+            last_valid_block_height,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 let err_msg = e.to_string();
@@ -2253,7 +2314,15 @@ impl Trader {
             (Vec::new(), HashSet::new())
         };
 
-        let exec = match execute_tx(rpc, &transaction, self.mode, &simulate_addresses).await {
+        let exec = match execute_tx(
+            rpc,
+            &transaction,
+            self.mode,
+            &simulate_addresses,
+            last_valid_block_height,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 let err_msg = e.to_string();
@@ -2624,7 +2693,15 @@ impl Trader {
             (Vec::new(), HashSet::new())
         };
 
-        let exec = match execute_tx(rpc, &transaction, self.mode, &simulate_addresses).await {
+        let exec = match execute_tx(
+            rpc,
+            &transaction,
+            self.mode,
+            &simulate_addresses,
+            last_valid_block_height,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 let err_msg = e.to_string();
