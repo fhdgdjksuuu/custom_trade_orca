@@ -349,6 +349,18 @@ fn compute_side(entry: &TrackerEvent) -> Result<&'static str> {
     }
 }
 
+fn side_human(side: &str) -> &'static str {
+    match side {
+        "LONG" => "на рост",
+        "SHORT" => "на падение",
+        _ => "неизвестно",
+    }
+}
+
+fn rpc_base_url(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
 async fn open_position(
     cfg: &Config,
     trader: &trade::Trader,
@@ -358,10 +370,22 @@ async fn open_position(
     dry_run: bool,
 ) -> Result<()> {
     if entry.whirlpool != cfg.pool {
+        println!(
+            "⏭️ Пропуск входа: другой пул ликвидности, player={} sig={} пул={}",
+            entry.player, entry.signature, entry.whirlpool
+        );
         return Ok(());
     }
     let side = compute_side(entry)?;
     let now = now_ms();
+    println!(
+        "🟢 Запрос на открытие позиции {}: player={} sig={} цена={:.8} цель={:.8}",
+        side_human(side),
+        entry.player,
+        entry.signature,
+        entry.price.unwrap_or_default(),
+        entry.target_price.unwrap_or_default()
+    );
 
     let existing: Option<(String, Option<i64>, Option<i64>)> = trade_conn
         .query_row(
@@ -377,14 +401,21 @@ async fn open_position(
 
     if let Some((status, _, _)) = &existing {
         if status == "OPEN" || status == "CLOSED" || status == "OPENING" || status == "CLOSING" {
+            println!(
+                "⏭️ Пропуск открытия: позиция уже в состоянии {} (player={} sig={})",
+                status, entry.player, entry.signature
+            );
             return Ok(());
         }
     }
 
     if dry_run {
         println!(
-            "DRY entry player={} signature={} side={} pool={}",
-            entry.player, entry.signature, side, entry.whirlpool
+            "🧪 Проверка входа: player={} sig={} сторона={} пул={}",
+            entry.player,
+            entry.signature,
+            side_human(side),
+            entry.whirlpool
         );
         return Ok(());
     }
@@ -445,9 +476,20 @@ async fn open_position(
         "#,
         params![position_id, now_ms(), entry.player, entry.signature],
     )?;
+    println!(
+        "✅ Открыта позиция {}: player={} sig={} position_id={}",
+        side_human(side),
+        entry.player,
+        entry.signature,
+        position_id
+    );
 
     let exit_id = pending_exit_id.or_else(|| existing.and_then(|x| x.2));
     if let Some(exit_event_id) = exit_id {
+        println!(
+            "🔁 Найден ожидающий выход: player={} sig={} событие_выхода={}",
+            entry.player, entry.signature, exit_event_id
+        );
         close_position(
             cfg,
             trader,
@@ -485,6 +527,10 @@ async fn close_position(
         .optional()?;
 
     let Some((side, position_id)) = row else {
+        println!(
+            "⚠️ Выход без записи: player={} sig={} событие_выхода={}",
+            player, signature, exit_event_id
+        );
         return Ok(());
     };
 
@@ -499,16 +545,31 @@ async fn close_position(
             "#,
             params![exit_event_id, now_ms(), player, signature],
         )?;
+        println!(
+            "⏸️ Выход отложен: позиция ещё не создана (player={} sig={})",
+            player, signature
+        );
         return Ok(());
     };
 
     if dry_run {
         println!(
-            "DRY exit player={} signature={} side={} position_id={}",
-            player, signature, side, position_id
+            "🧪 Проверка выхода: player={} sig={} сторона={} position_id={}",
+            player,
+            signature,
+            side_human(&side),
+            position_id
         );
         return Ok(());
     }
+
+    println!(
+        "🔵 Закрытие позиции {}: player={} sig={} position_id={}",
+        side_human(&side),
+        player,
+        signature,
+        position_id
+    );
 
     trade_conn.execute(
         r#"
@@ -542,6 +603,13 @@ async fn close_position(
         "#,
         params![now_ms(), player, signature],
     )?;
+    println!(
+        "✅ Позиция закрыта {}: player={} sig={} position_id={}",
+        side_human(&side),
+        player,
+        signature,
+        position_id
+    );
 
     Ok(())
 }
@@ -556,20 +624,17 @@ async fn handle_entry_event(
     dry_run: bool,
 ) -> Result<()> {
     if entry.player.is_empty() || entry.signature.is_empty() || entry.whirlpool.is_empty() {
+        println!(
+            "⚠️ Пропуск входа: пустые поля player/signature/whirlpool (id={})",
+            entry.id
+        );
         return Ok(());
     }
     if !is_player_good(players_conn, &entry.player)? {
-        if dry_run {
-            println!(
-                "DRY skip player not good player={} signature={}",
-                entry.player, entry.signature
-            );
-        } else {
-            eprintln!(
-                "skip player not good player={} signature={}",
-                entry.player, entry.signature
-            );
-        }
+        println!(
+            "⛔ Пропуск входа: игрок не допущен (player={} sig={})",
+            entry.player, entry.signature
+        );
         return Ok(());
     }
     open_position(cfg, trader, trade_conn, entry, pending_exit_id, dry_run).await
@@ -585,6 +650,10 @@ async fn handle_target_event(
     dry_run: bool,
 ) -> Result<()> {
     if event.player.is_empty() || event.signature.is_empty() {
+        println!(
+            "⚠️ Пропуск выхода: пустые поля player/signature (id={})",
+            event.id
+        );
         return Ok(());
     }
     let existing: Option<String> = trade_conn
@@ -615,7 +684,7 @@ async fn handle_target_event(
         if status == "OPENING" || status == "PENDING_CLOSE" {
             if dry_run {
                 println!(
-                    "DRY pending_close player={} signature={}",
+                    "🧪 Проверка выхода: ожидание открытия (player={} sig={})",
                     event.player, event.signature
                 );
                 return Ok(());
@@ -630,13 +699,25 @@ async fn handle_target_event(
                 "#,
                 params![event.id, now_ms(), event.player, event.signature],
             )?;
+            println!(
+                "⏸️ Выход отложен до открытия: player={} sig={}",
+                event.player, event.signature
+            );
             return Ok(());
         }
+        println!(
+            "⏭️ Пропуск выхода: неподходящий статус {} (player={} sig={})",
+            status, event.player, event.signature
+        );
         return Ok(());
     }
 
     let entry = find_entry_event(tracker_conn, &event.player, &event.signature)?;
     let Some(entry) = entry else {
+        println!(
+            "⚠️ Выход без входа: не найден ENTRY_SIGNAL (player={} sig={})",
+            event.player, event.signature
+        );
         return Ok(());
     };
 
@@ -692,6 +773,22 @@ fn fetch_event_by_id(conn: &Connection, id: i64) -> Result<Option<TrackerEvent>>
 }
 
 pub async fn run_polling(cfg: Config) -> Result<()> {
+    println!("🚦 Исполнитель торговли запущен (опрос базы).");
+    println!(
+        "🗂️ БД: tracker={}, trade={}, players={}",
+        cfg.tracker_db, cfg.trade_db, cfg.players_db
+    );
+    println!("🌊 Пул ликвидности: {}", cfg.pool);
+    println!(
+        "💵 Сумма сделки: {} USDC, проскальзывание: {} б.п.",
+        cfg.usdc_ui, cfg.slippage_bps
+    );
+    println!(
+        "🧪 Режим проверки без симуляции: {}",
+        if cfg.dry_run { "да" } else { "нет" }
+    );
+    println!("🔌 Узел торговли: {}", rpc_base_url(&cfg.rpc_url));
+
     let trader = build_trader(&cfg)?;
     let tracker_conn = open_db(&cfg.tracker_db)?;
     let trade_conn = open_db(&cfg.trade_db)?;
@@ -709,6 +806,7 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
         let events = fetch_events(&tracker_conn, last_event_id)?;
         if events.is_empty() {
             if cfg.once {
+                println!("🏁 Опрос завершён: новых событий нет.");
                 break;
             }
             sleep(Duration::from_millis(cfg.poll_ms)).await;
@@ -716,6 +814,10 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
         }
 
         for event in events {
+            println!(
+                "📨 Событие: action={} id={} player={} sig={}",
+                event.action, event.id, event.player, event.signature
+            );
             let res = match event.action.as_str() {
                 "ENTRY_SIGNAL" => {
                     handle_entry_event(
@@ -760,12 +862,17 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
                         .unwrap_or(0);
                     if updated == 0 {
                         eprintln!(
-                            "untracked error for player={} signature={} err={}",
+                            "❌ Ошибка без записи: player={} sig={} err={}",
+                            event.player, event.signature, err
+                        );
+                    } else {
+                        eprintln!(
+                            "❌ Ошибка обработки: player={} sig={} err={}",
                             event.player, event.signature, err
                         );
                     }
                 } else {
-                    eprintln!("event error: {:?}", err);
+                    eprintln!("❌ Ошибка обработки события: {:?}", err);
                 }
             }
 
@@ -783,6 +890,22 @@ pub async fn run_from_signals(
     cfg: Config,
     mut signals: UnboundedReceiver<TradeSignal>,
 ) -> Result<()> {
+    println!("🚦 Исполнитель торговли запущен (реакция на сигналы).");
+    println!(
+        "🗂️ БД: tracker={}, trade={}, players={}",
+        cfg.tracker_db, cfg.trade_db, cfg.players_db
+    );
+    println!("🌊 Пул ликвидности: {}", cfg.pool);
+    println!(
+        "💵 Сумма сделки: {} USDC, проскальзывание: {} б.п.",
+        cfg.usdc_ui, cfg.slippage_bps
+    );
+    println!(
+        "🧪 Режим проверки без симуляции: {}",
+        if cfg.dry_run { "да" } else { "нет" }
+    );
+    println!("🔌 Узел торговли: {}", rpc_base_url(&cfg.rpc_url));
+
     let trader = build_trader(&cfg)?;
     let tracker_conn = open_db(&cfg.tracker_db)?;
     let trade_conn = open_db(&cfg.trade_db)?;
@@ -791,12 +914,19 @@ pub async fn run_from_signals(
     ensure_players_schema(&players_conn)?;
 
     while let Some(signal) = signals.recv().await {
+        println!("📨 Сигнал: action={} id={}", signal.action, signal.id);
         if signal.action != "ENTRY_SIGNAL" && signal.action != "TARGET_HIT" {
+            println!("⏭️ Пропуск сигнала: неизвестное действие {}", signal.action);
             continue;
         }
         let Some(event) = fetch_event_by_id(&tracker_conn, signal.id)? else {
+            println!("⚠️ Событие не найдено в tracker.db: id={}", signal.id);
             continue;
         };
+        println!(
+            "🧭 Событие: action={} id={} player={} sig={}",
+            event.action, event.id, event.player, event.signature
+        );
         let res = match event.action.as_str() {
             "ENTRY_SIGNAL" => {
                 handle_entry_event(
@@ -841,15 +971,21 @@ pub async fn run_from_signals(
                     .unwrap_or(0);
                 if updated == 0 {
                     eprintln!(
-                        "untracked error for player={} signature={} err={}",
+                        "❌ Ошибка без записи: player={} sig={} err={}",
+                        event.player, event.signature, err
+                    );
+                } else {
+                    eprintln!(
+                        "❌ Ошибка обработки: player={} sig={} err={}",
                         event.player, event.signature, err
                     );
                 }
             } else {
-                eprintln!("event error: {:?}", err);
+                eprintln!("❌ Ошибка обработки события: {:?}", err);
             }
         }
     }
 
+    println!("🛑 Исполнитель торговли завершил работу.");
     Ok(())
 }

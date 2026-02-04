@@ -1047,7 +1047,37 @@ async fn execute_tx(
                 .await
                 .context("simulate_transaction_with_config")?;
             if let Some(err) = res.value.err.clone() {
+                eprintln!("❌ Симуляция транзакции: ошибка {err:?}");
+                if let Some(units) = res.value.units_consumed {
+                    eprintln!("⚙️ Потрачено вычислительных единиц: {units}");
+                }
+                match &res.value.logs {
+                    Some(logs) if !logs.is_empty() => {
+                        eprintln!("📜 Логи инструкций симуляции:");
+                        for line in logs {
+                            eprintln!("📜 {line}");
+                        }
+                    }
+                    _ => {
+                        eprintln!("⚠️ Логи симуляции отсутствуют.");
+                    }
+                }
                 return Err(anyhow!("simulateTransaction error: {err:?}"));
+            }
+            println!("🧪 Симуляция транзакции: успешно.");
+            if let Some(units) = res.value.units_consumed {
+                println!("⚙️ Потрачено вычислительных единиц: {units}");
+            }
+            match &res.value.logs {
+                Some(logs) if !logs.is_empty() => {
+                    println!("📜 Логи инструкций симуляции:");
+                    for line in logs {
+                        println!("📜 {line}");
+                    }
+                }
+                _ => {
+                    println!("⚠️ Логи симуляции отсутствуют.");
+                }
             }
             let sig = tx.signatures.get(0).cloned().unwrap_or_default();
             Ok(TxExecution {
