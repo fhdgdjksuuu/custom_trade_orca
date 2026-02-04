@@ -890,6 +890,7 @@ name = "custom_trade_orca"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "borsh 0.10.4",
  "bs58",
@@ -910,6 +911,7 @@ dependencies = [
  "solana-keypair",
  "solana-program-pack",
  "solana-pubkey",
+ "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-sdk",
  "solana-signature",

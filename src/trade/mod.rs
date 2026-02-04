@@ -20,9 +20,14 @@ use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_program_pack::Pack;
 use solana_pubkey::Pubkey;
+use solana_rpc_client::http_sender::HttpSender;
+use solana_rpc_client::rpc_client::RpcClientConfig;
+use solana_rpc_client::rpc_sender::{RpcSender, RpcTransportStats};
+use solana_rpc_client_api::client_error::Result as RpcResult;
 use solana_rpc_client_api::config::{
     RpcSendTransactionConfig, RpcSimulateTransactionAccountsConfig, RpcSimulateTransactionConfig,
 };
+use solana_rpc_client_api::request::RpcRequest;
 use solana_rpc_client_api::request::TokenAccountsFilter;
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 use solana_signature::Signature;
@@ -32,14 +37,18 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use spl_token;
 use spl_token_2022;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     str::FromStr,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
+use tokio::sync::Mutex;
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const SIMULATION_FEE_LAMPORTS: u64 = 5000;
+const RPC_RATE_LIMIT_PER_SEC: usize = 9;
+const RPC_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
@@ -52,6 +61,7 @@ pub struct Trader {
     pub payer: Keypair,
     pub mode: ExecMode,
     pub db: TradeDb,
+    rpc_limiter: Arc<RpcRateLimiter>,
 }
 
 struct TradeDb {
@@ -69,6 +79,81 @@ impl ExecMode {
 
 fn trade_commitment() -> CommitmentConfig {
     CommitmentConfig::confirmed()
+}
+
+struct RpcRateLimiter {
+    max_per_window: usize,
+    window: Duration,
+    state: Mutex<VecDeque<Instant>>,
+}
+
+impl RpcRateLimiter {
+    fn new(max_per_window: usize, window: Duration) -> Self {
+        Self {
+            max_per_window,
+            window,
+            state: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    async fn acquire(&self) {
+        loop {
+            let now = Instant::now();
+            let mut guard = self.state.lock().await;
+            while let Some(front) = guard.front().copied() {
+                if now.duration_since(front) >= self.window {
+                    guard.pop_front();
+                } else {
+                    break;
+                }
+            }
+            if guard.len() < self.max_per_window {
+                guard.push_back(now);
+                return;
+            }
+            let wait = guard
+                .front()
+                .map(|t| self.window.saturating_sub(now.duration_since(*t)))
+                .unwrap_or(Duration::from_millis(0));
+            drop(guard);
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+struct RateLimitedRpcSender {
+    inner: HttpSender,
+    limiter: Arc<RpcRateLimiter>,
+}
+
+impl RateLimitedRpcSender {
+    fn new(url: String, limiter: Arc<RpcRateLimiter>) -> Self {
+        Self {
+            inner: HttpSender::new(url),
+            limiter,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RpcSender for RateLimitedRpcSender {
+    async fn send(&self, request: RpcRequest, params: serde_json::Value) -> RpcResult<Value> {
+        self.limiter.acquire().await;
+        self.inner.send(request, params).await
+    }
+
+    fn get_transport_stats(&self) -> RpcTransportStats {
+        self.inner.get_transport_stats()
+    }
+
+    fn url(&self) -> String {
+        self.inner.url()
+    }
+}
+
+fn build_rate_limited_rpc_client(url: &str, limiter: Arc<RpcRateLimiter>) -> RpcClient {
+    let sender = RateLimitedRpcSender::new(url.to_string(), limiter);
+    RpcClient::new_sender(sender, RpcClientConfig::with_commitment(trade_commitment()))
 }
 
 impl TradeDb {
@@ -235,8 +320,13 @@ impl TradeDb {
         Ok(())
     }
 
-    async fn reconcile_pending(&self, rpc: &RpcClient, mode: ExecMode) -> Result<()> {
-        let http = HttpRpc::new(rpc.url());
+    async fn reconcile_pending(
+        &self,
+        rpc: &RpcClient,
+        mode: ExecMode,
+        limiter: &Arc<RpcRateLimiter>,
+    ) -> Result<()> {
+        let http = HttpRpc::new(rpc.url(), limiter.clone());
         let conn = self.open_conn()?;
         let mut stmt = conn.prepare(
             r#"
@@ -657,13 +747,15 @@ impl TokenProgramFlavor {
 struct HttpRpc {
     url: String,
     client: HttpClient,
+    limiter: Arc<RpcRateLimiter>,
 }
 
 impl HttpRpc {
-    fn new(url: String) -> Self {
+    fn new(url: String, limiter: Arc<RpcRateLimiter>) -> Self {
         Self {
             url,
             client: HttpClient::new(),
+            limiter,
         }
     }
 
@@ -681,6 +773,7 @@ impl HttpRpc {
                 }
             ]
         });
+        self.limiter.acquire().await;
         let resp = self
             .client
             .post(&self.url)
@@ -1144,6 +1237,50 @@ async fn rent_budget_for_atas(rpc: &RpcClient, atas: &[Pubkey]) -> Result<u64> {
     Ok(total)
 }
 
+fn find_reqwest_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a reqwest::Error> {
+    if let Some(req) = err.downcast_ref::<reqwest::Error>() {
+        return Some(req);
+    }
+    let mut source = err.source();
+    while let Some(src) = source {
+        if let Some(req) = src.downcast_ref::<reqwest::Error>() {
+            return Some(req);
+        }
+        source = src.source();
+    }
+    None
+}
+
+fn format_orca_swap_error(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("{err:?}"));
+    let mut source = err.source();
+    while let Some(src) = source {
+        parts.push(format!("{src:?}"));
+        source = src.source();
+    }
+    if let Some(req) = find_reqwest_error(err) {
+        let mut extra = Vec::new();
+        if let Some(status) = req.status() {
+            extra.push(format!("status={status}"));
+        }
+        if let Some(url) = req.url() {
+            let mut clean = url.clone();
+            clean.set_query(None);
+            extra.push(format!("url={clean}"));
+        }
+        extra.push(format!("is_decode={}", req.is_decode()));
+        extra.push(format!("is_timeout={}", req.is_timeout()));
+        extra.push(format!("is_connect={}", req.is_connect()));
+        if !extra.is_empty() {
+            parts.push(extra.join(", "));
+        }
+    }
+    parts.join(" | ")
+}
+
 async fn build_swap_instructions(
     rpc: &RpcClient,
     payer: &Keypair,
@@ -1164,7 +1301,12 @@ async fn build_swap_instructions(
         Some(payer.pubkey()),
     )
     .await
-    .map_err(|e| anyhow!("orca swap_instructions failed: {e}"))?;
+    .map_err(|e| {
+        anyhow!(
+            "orca swap_instructions failed: {}",
+            format_orca_swap_error(e.as_ref())
+        )
+    })?;
     Ok(swap)
 }
 
@@ -1276,7 +1418,11 @@ async fn swap_core(
 ) -> Result<Signature> {
     configure_orca(&payer.pubkey())?;
 
-    let rpc = RpcClient::new(rpc_url.to_string());
+    let limiter = Arc::new(RpcRateLimiter::new(
+        RPC_RATE_LIMIT_PER_SEC,
+        RPC_RATE_LIMIT_WINDOW,
+    ));
+    let rpc = build_rate_limited_rpc_client(rpc_url, limiter);
 
     let swap = swap_instructions(
         &rpc,
@@ -1288,7 +1434,12 @@ async fn swap_core(
         Some(payer.pubkey()),
     )
     .await
-    .map_err(|e| anyhow!("orca swap_instructions failed: {e}"))?;
+    .map_err(|e| {
+        anyhow!(
+            "orca swap_instructions failed: {}",
+            format_orca_swap_error(e.as_ref())
+        )
+    })?;
 
     let mut ixs = Vec::with_capacity(
         pre_instructions.len() + swap.instructions.len() + post_instructions.len(),
@@ -1380,13 +1531,18 @@ impl Trader {
         mode: ExecMode,
         db_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        let rpc = RpcClient::new_with_commitment(rpc_url.to_string(), trade_commitment());
+        let limiter = Arc::new(RpcRateLimiter::new(
+            RPC_RATE_LIMIT_PER_SEC,
+            RPC_RATE_LIMIT_WINDOW,
+        ));
+        let rpc = build_rate_limited_rpc_client(rpc_url, limiter.clone());
         let db = TradeDb::new(db_path.as_ref())?;
         Ok(Self {
             rpc,
             payer,
             mode,
             db,
+            rpc_limiter: limiter,
         })
     }
 
@@ -1399,12 +1555,13 @@ impl Trader {
         let db = &self.db;
         let rpc = &self.rpc;
         let http = if self.mode == ExecMode::Live {
-            Some(HttpRpc::new(self.rpc.url()))
+            Some(HttpRpc::new(self.rpc.url(), self.rpc_limiter.clone()))
         } else {
             None
         };
 
-        db.reconcile_pending(rpc, self.mode).await?;
+        db.reconcile_pending(rpc, self.mode, &self.rpc_limiter)
+            .await?;
 
         let whirlpool = Pubkey::from_str(pool).context("bad pool pubkey")?;
         let (mint_a, mint_b) = resolve_pool_mints(rpc, &whirlpool).await?;
@@ -1772,12 +1929,13 @@ impl Trader {
         let db = &self.db;
         let rpc = &self.rpc;
         let http = if self.mode == ExecMode::Live {
-            Some(HttpRpc::new(self.rpc.url()))
+            Some(HttpRpc::new(self.rpc.url(), self.rpc_limiter.clone()))
         } else {
             None
         };
 
-        db.reconcile_pending(rpc, self.mode).await?;
+        db.reconcile_pending(rpc, self.mode, &self.rpc_limiter)
+            .await?;
 
         let payer_pubkey = self.payer.pubkey();
         let conn = db.open_conn()?;
@@ -2115,12 +2273,13 @@ impl Trader {
         let db = &self.db;
         let rpc = &self.rpc;
         let http = if self.mode == ExecMode::Live {
-            Some(HttpRpc::new(self.rpc.url()))
+            Some(HttpRpc::new(self.rpc.url(), self.rpc_limiter.clone()))
         } else {
             None
         };
 
-        db.reconcile_pending(rpc, self.mode).await?;
+        db.reconcile_pending(rpc, self.mode, &self.rpc_limiter)
+            .await?;
 
         let whirlpool = Pubkey::from_str(pool).context("bad pool pubkey")?;
         let (mint_a, mint_b) = resolve_pool_mints(rpc, &whirlpool).await?;
@@ -2489,12 +2648,13 @@ impl Trader {
         let db = &self.db;
         let rpc = &self.rpc;
         let http = if self.mode == ExecMode::Live {
-            Some(HttpRpc::new(self.rpc.url()))
+            Some(HttpRpc::new(self.rpc.url(), self.rpc_limiter.clone()))
         } else {
             None
         };
 
-        db.reconcile_pending(rpc, self.mode).await?;
+        db.reconcile_pending(rpc, self.mode, &self.rpc_limiter)
+            .await?;
 
         let payer_pubkey = self.payer.pubkey();
         let conn = db.open_conn()?;
