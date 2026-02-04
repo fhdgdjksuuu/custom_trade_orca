@@ -27,12 +27,8 @@ use solana_rpc_client_api::request::TokenAccountsFilter;
 use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 use solana_signature::Signature;
 use solana_signer::Signer;
-use solana_system_interface::instruction as system_ix;
 use solana_transaction::Transaction;
-use spl_associated_token_account::{
-    get_associated_token_address_with_program_id,
-    instruction::create_associated_token_account_idempotent,
-};
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 use spl_token;
 use spl_token_2022;
 use std::{
@@ -706,7 +702,7 @@ fn configure_orca(payer: &Pubkey) -> Result<()> {
     set_whirlpools_config_address(WhirlpoolsConfigInput::SolanaMainnet)
         .map_err(|e| anyhow!(e.to_string()))?;
     set_funder(*payer).map_err(|e| anyhow!(e.to_string()))?;
-    set_native_mint_wrapping_strategy(NativeMintWrappingStrategy::None)
+    set_native_mint_wrapping_strategy(NativeMintWrappingStrategy::Ata)
         .map_err(|e| anyhow!(e.to_string()))?;
     Ok(())
 }
@@ -752,7 +748,7 @@ async fn ensure_wsol_ata_is_safe_to_use_and_close(
     rpc: &RpcClient,
     wsol_ata: &Pubkey,
     wsol_token_program: TokenProgramFlavor,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(acc) = get_account_optional(rpc, wsol_ata).await? {
         let amount = wsol_token_program.unpack_token_account_amount(&acc.data)?;
         if amount != 0 {
@@ -762,8 +758,9 @@ async fn ensure_wsol_ata_is_safe_to_use_and_close(
                 amount
             ));
         }
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn ui_to_amount(ui: &str, decimals: u8) -> Result<u64> {
@@ -1386,7 +1383,8 @@ impl Trader {
             &wsol_program.program_id(),
         );
 
-        ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
+        let wsol_ata_exists =
+            ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
         let swap = build_swap_instructions(
             rpc,
@@ -1406,33 +1404,16 @@ impl Trader {
         } = swap;
         let min_out = exact_in_min_out(&quote)?;
 
-        let mut pre_instructions = Vec::new();
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &usdc_mint,
-            &usdc_program.program_id(),
-        ));
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &wsol_mint,
-            &wsol_program.program_id(),
-        ));
-
-        let mut post_instructions = Vec::new();
-        post_instructions.push(wsol_program.close_account_ix(
-            &wsol_ata,
-            &payer_pubkey,
-            &payer_pubkey,
-        )?);
-
-        let mut instructions = Vec::with_capacity(
-            pre_instructions.len() + swap_instructions.len() + post_instructions.len(),
-        );
-        instructions.extend(pre_instructions);
+        let mut instructions =
+            Vec::with_capacity(swap_instructions.len() + if wsol_ata_exists { 1 } else { 0 });
         instructions.extend(swap_instructions);
-        instructions.extend(post_instructions);
+        if wsol_ata_exists {
+            instructions.push(wsol_program.close_account_ix(
+                &wsol_ata,
+                &payer_pubkey,
+                &payer_pubkey,
+            )?);
+        }
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
         let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
@@ -1783,7 +1764,8 @@ impl Trader {
             &wsol_program.program_id(),
         );
 
-        ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
+        let wsol_ata_exists =
+            ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
         let swap = build_swap_instructions(
             rpc,
@@ -1803,35 +1785,16 @@ impl Trader {
         } = swap;
         let min_out = exact_in_min_out(&quote)?;
 
-        let mut pre_instructions = Vec::new();
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &usdc_mint,
-            &usdc_program.program_id(),
-        ));
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &wsol_mint,
-            &wsol_program.program_id(),
-        ));
-        pre_instructions.push(system_ix::transfer(&payer_pubkey, &wsol_ata, sol_position));
-        pre_instructions.push(wsol_program.sync_native_ix(&wsol_ata)?);
-
-        let mut post_instructions = Vec::new();
-        post_instructions.push(wsol_program.close_account_ix(
-            &wsol_ata,
-            &payer_pubkey,
-            &payer_pubkey,
-        )?);
-
-        let mut instructions = Vec::with_capacity(
-            pre_instructions.len() + swap_instructions.len() + post_instructions.len(),
-        );
-        instructions.extend(pre_instructions);
+        let mut instructions =
+            Vec::with_capacity(swap_instructions.len() + if wsol_ata_exists { 1 } else { 0 });
         instructions.extend(swap_instructions);
-        instructions.extend(post_instructions);
+        if wsol_ata_exists {
+            instructions.push(wsol_program.close_account_ix(
+                &wsol_ata,
+                &payer_pubkey,
+                &payer_pubkey,
+            )?);
+        }
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
         let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
@@ -2120,7 +2083,8 @@ impl Trader {
             &wsol_program.program_id(),
         );
 
-        ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
+        let wsol_ata_exists =
+            ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
         let swap = build_swap_instructions(
             rpc,
@@ -2141,35 +2105,16 @@ impl Trader {
         let max_sol_in = exact_out_max_in(&quote)?;
         let est_sol_in = exact_out_est_in(&quote)?;
 
-        let mut pre_instructions = Vec::new();
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &usdc_mint,
-            &usdc_program.program_id(),
-        ));
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &wsol_mint,
-            &wsol_program.program_id(),
-        ));
-        pre_instructions.push(system_ix::transfer(&payer_pubkey, &wsol_ata, max_sol_in));
-        pre_instructions.push(wsol_program.sync_native_ix(&wsol_ata)?);
-
-        let mut post_instructions = Vec::new();
-        post_instructions.push(wsol_program.close_account_ix(
-            &wsol_ata,
-            &payer_pubkey,
-            &payer_pubkey,
-        )?);
-
-        let mut instructions = Vec::with_capacity(
-            pre_instructions.len() + swap_instructions.len() + post_instructions.len(),
-        );
-        instructions.extend(pre_instructions);
+        let mut instructions =
+            Vec::with_capacity(swap_instructions.len() + if wsol_ata_exists { 1 } else { 0 });
         instructions.extend(swap_instructions);
-        instructions.extend(post_instructions);
+        if wsol_ata_exists {
+            instructions.push(wsol_program.close_account_ix(
+                &wsol_ata,
+                &payer_pubkey,
+                &payer_pubkey,
+            )?);
+        }
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
         let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
@@ -2521,7 +2466,8 @@ impl Trader {
             &wsol_program.program_id(),
         );
 
-        ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
+        let wsol_ata_exists =
+            ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
         let swap = build_swap_instructions(
             rpc,
@@ -2542,33 +2488,16 @@ impl Trader {
         let max_usdc_in = exact_out_max_in(&quote)?;
         let est_usdc_in = exact_out_est_in(&quote)?;
 
-        let mut pre_instructions = Vec::new();
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &usdc_mint,
-            &usdc_program.program_id(),
-        ));
-        pre_instructions.push(create_associated_token_account_idempotent(
-            &payer_pubkey,
-            &payer_pubkey,
-            &wsol_mint,
-            &wsol_program.program_id(),
-        ));
-
-        let mut post_instructions = Vec::new();
-        post_instructions.push(wsol_program.close_account_ix(
-            &wsol_ata,
-            &payer_pubkey,
-            &payer_pubkey,
-        )?);
-
-        let mut instructions = Vec::with_capacity(
-            pre_instructions.len() + swap_instructions.len() + post_instructions.len(),
-        );
-        instructions.extend(pre_instructions);
+        let mut instructions =
+            Vec::with_capacity(swap_instructions.len() + if wsol_ata_exists { 1 } else { 0 });
         instructions.extend(swap_instructions);
-        instructions.extend(post_instructions);
+        if wsol_ata_exists {
+            instructions.push(wsol_program.close_account_ix(
+                &wsol_ata,
+                &payer_pubkey,
+                &payer_pubkey,
+            )?);
+        }
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
         let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
