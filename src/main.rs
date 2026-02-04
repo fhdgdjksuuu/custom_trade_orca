@@ -25,6 +25,7 @@ const SOLANA_RPC_WS_URL: &str =
     "wss://mainnet.helius-rpc.com/?api-key=ef131ba9-5495-460f-9d12-06515001f5ed";
 const SOLANA_TRADE_RPC_HTTP_URL: &str =
     "https://mainnet.helius-rpc.com/?api-key=d83804d1-9c0c-4de0-8d42-f85c8e39f897";
+const TRADE_EXEC_MODE: trade::ExecMode = trade::ExecMode::Simulate;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -94,7 +95,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let trade_cfg = trade::executor::config_from_env()?;
+    let trade_cfg = trade::executor::config_from_env_with_mode(TRADE_EXEC_MODE)?;
     let exec_fut = trade::executor::run_from_signals(trade_cfg, trade_rx);
     let tracker_fut = tracker::run(TARGET_PROFIT_PCT, players, rx, shutdown, Some(trade_tx));
     tokio::try_join!(exec_fut, tracker_fut).map(|_| ())

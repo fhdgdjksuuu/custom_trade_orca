@@ -33,6 +33,7 @@ pub struct Config {
     dry_run: bool,
     once: bool,
     poll_ms: u64,
+    mode: trade::ExecMode,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,7 @@ fn default_config() -> Config {
         dry_run: false,
         once: false,
         poll_ms: DEFAULT_POLL_MS,
+        mode: trade::ExecMode::Simulate,
     }
 }
 
@@ -77,6 +79,13 @@ fn validate_config(cfg: &Config) -> Result<()> {
 
 pub fn config_from_env() -> Result<Config> {
     let cfg = default_config();
+    validate_config(&cfg)?;
+    Ok(cfg)
+}
+
+pub fn config_from_env_with_mode(mode: trade::ExecMode) -> Result<Config> {
+    let mut cfg = default_config();
+    cfg.mode = mode;
     validate_config(&cfg)?;
     Ok(cfg)
 }
@@ -870,12 +879,7 @@ fn build_trader(cfg: &Config) -> Result<trade::Trader> {
     } else {
         read_keypair_file(&cfg.keypair_path).map_err(|e| anyhow!("read keypair: {e}"))?
     };
-    trade::Trader::new(
-        &cfg.rpc_url,
-        payer,
-        trade::ExecMode::Simulate,
-        &cfg.trade_db,
-    )
+    trade::Trader::new(&cfg.rpc_url, payer, cfg.mode, &cfg.trade_db)
 }
 
 fn fetch_event_by_id(conn: &Connection, id: i64) -> Result<Option<TrackerEvent>> {
@@ -917,6 +921,20 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
     println!(
         "🧪 Режим проверки без симуляции: {}",
         if cfg.dry_run { "да" } else { "нет" }
+    );
+    println!(
+        "🎛️ Режим торговли: {}",
+        match cfg.mode {
+            trade::ExecMode::Simulate => "SIMULATE",
+            trade::ExecMode::Live => "LIVE",
+        }
+    );
+    println!(
+        "🎛️ Режим торговли: {}",
+        match cfg.mode {
+            trade::ExecMode::Simulate => "SIMULATE",
+            trade::ExecMode::Live => "LIVE",
+        }
     );
     println!("🔌 Узел торговли: {}", rpc_base_url(&cfg.rpc_url));
 
