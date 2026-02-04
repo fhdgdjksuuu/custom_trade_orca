@@ -33,6 +33,15 @@ run_sql() {
   sqlite3 -readonly "$db" "$sql"
 }
 
+has_column() {
+  local db="$1"
+  local table="$2"
+  local col="$3"
+  local val
+  val=$(run_sql "$db" "SELECT 1 FROM pragma_table_info('$table') WHERE name='$col' LIMIT 1;")
+  [ -n "$val" ]
+}
+
 echo "== Файлы БД =="
 ls -lh "$TRACKER_DB" "$TRADE_DB" "$PLAYERS_DB"
 echo
@@ -134,7 +143,11 @@ echo
 
 echo "== Последние связи торговли (trade.db) =="
 if [ "$trade_links_count" -gt 0 ]; then
-  run_sql "$TRADE_DB" "SELECT player, signature, status, position_id, datetime(updated_at_ms/1000,'unixepoch') FROM trade_links ORDER BY updated_at_ms DESC LIMIT 10;"
+  if has_column "$TRADE_DB" "positions" "profit_pct"; then
+    run_sql "$TRADE_DB" "SELECT t.player, t.signature, t.status, t.position_id, p.side, p.state, p.entry_price, p.exit_price, p.profit_pct, datetime(t.updated_at_ms/1000,'unixepoch') FROM trade_links t LEFT JOIN positions p ON p.id = t.position_id ORDER BY t.updated_at_ms DESC LIMIT 10;"
+  else
+    run_sql "$TRADE_DB" "SELECT player, signature, status, position_id, datetime(updated_at_ms/1000,'unixepoch') FROM trade_links ORDER BY updated_at_ms DESC LIMIT 10;"
+  fi
 else
   echo "Нет данных."
 fi
@@ -153,6 +166,31 @@ echo
 echo "== Последние события по сделкам (trade.db) =="
 if [ "$trade_events_count" -gt 0 ]; then
   run_sql "$TRADE_DB" "SELECT e.ts_ms, p.side, p.state, e.event_type FROM trade_events e JOIN positions p ON p.id=e.position_id ORDER BY e.ts_ms DESC LIMIT 20;"
+else
+  echo "Нет данных."
+fi
+
+echo
+
+echo "== Профит по позициям (trade.db) =="
+if has_column "$TRADE_DB" "positions" "profit_pct"; then
+  profit_count=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM positions WHERE profit_pct IS NOT NULL;")
+  closed_profit_count=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL;")
+  avg_profit=$(run_sql "$TRADE_DB" "SELECT COALESCE(AVG(profit_pct),0) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL;")
+  echo "Позиции с расчётом profit_pct: $profit_count"
+  echo "Закрытые с profit_pct: $closed_profit_count"
+  echo "Средний profit_pct (CLOSED): $avg_profit"
+  echo "Последние 10 позиций с profit_pct:"
+  run_sql "$TRADE_DB" "SELECT id, side, state, entry_price, exit_price, profit_pct, datetime(updated_at_ms/1000,'unixepoch') FROM positions WHERE profit_pct IS NOT NULL ORDER BY updated_at_ms DESC LIMIT 10;"
+else
+  echo "Колонка profit_pct отсутствует."
+fi
+
+echo
+
+echo "== Последние события PROFIT (trade.db) =="
+if [ "$trade_events_count" -gt 0 ]; then
+  run_sql "$TRADE_DB" "SELECT ts_ms, position_id, event_type, details_json FROM trade_events WHERE event_type='PROFIT' ORDER BY ts_ms DESC LIMIT 10;"
 else
   echo "Нет данных."
 fi
