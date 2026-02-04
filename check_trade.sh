@@ -13,6 +13,8 @@ TRACKER_DB="${TRACKER_DB:-tracker.db}"
 TRADE_DB="${TRADE_DB:-trade.db}"
 PLAYERS_DB="${PLAYERS_DB:-players.db}"
 EXPECTED_POOL="${EXPECTED_POOL:-}"
+USDC_PER_TRADE="${USDC_PER_TRADE:-1}"
+LAMPORTS_PER_SOL=1000000000
 
 if [ ! -f "$TRACKER_DB" ]; then
   echo "Нет файла $TRACKER_DB"
@@ -131,6 +133,29 @@ echo "Последнее событие торговли: $last_trade_event_ts_h
 
 echo
 
+echo "== Сделки и прибыль (trade.db) =="
+if has_column "$TRADE_DB" "positions" "profit_pct"; then
+  closed_positions=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM positions WHERE state='CLOSED';")
+  open_positions=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM positions WHERE state='OPEN';")
+  open_committed=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM trade_events WHERE event_type='OPEN_COMMITTED';")
+  close_committed=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM trade_events WHERE event_type='CLOSE_COMMITTED';")
+  sum_profit_usdc=$(run_sql "$TRADE_DB" "SELECT COALESCE(SUM(profit_pct * $USDC_PER_TRADE / 100.0),0) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL;")
+  sum_profit_sol=$(run_sql "$TRADE_DB" "SELECT COALESCE(SUM((profit_pct * $USDC_PER_TRADE / 100.0) * exit_price),0) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL AND exit_price IS NOT NULL;")
+  spent_usdc=$(run_sql "$TRADE_DB" "SELECT COALESCE(COUNT(*),0) * $USDC_PER_TRADE FROM positions WHERE state='CLOSED';")
+  echo "Сделок закрыто (positions): $closed_positions"
+  echo "Сделок открыто (positions): $open_positions"
+  echo "OPEN_COMMITTED (trade_events): $open_committed"
+  echo "CLOSE_COMMITTED (trade_events): $close_committed"
+  echo "Потрачено USDC (закрытые): $spent_usdc"
+  echo "Заработано USDC (сумма profit_pct): $sum_profit_usdc"
+  echo "Заработано SOL (по exit_price): $sum_profit_sol"
+  echo "USDC на сделку (настройка): $USDC_PER_TRADE"
+else
+  echo "Колонка profit_pct отсутствует."
+fi
+
+echo
+
 echo "== Состояния связей торговли (trade.db) =="
 run_sql "$TRADE_DB" "WITH statuses(s) AS (VALUES('OPENING'),('OPEN'),('CLOSING'),('CLOSED'),('FAILED'),('PENDING_CLOSE')) SELECT s AS status, COALESCE(c.cnt,0) FROM statuses s LEFT JOIN (SELECT status, COUNT(*) cnt FROM trade_links GROUP BY status) c ON c.status=s;"
 
@@ -200,6 +225,17 @@ echo
 echo "== Баланс симуляции (trade.db) =="
 if [ "$sim_wallet_count" -gt 0 ]; then
   run_sql "$TRADE_DB" "SELECT payer, usdc_balance, sol_lamports, datetime(updated_at_ms/1000,'unixepoch') FROM sim_wallet;"
+  reserved_sol=$(run_sql "$TRADE_DB" "SELECT COALESCE(SUM(reserved_sol_lamports),0) FROM positions WHERE state IN ('OPENING','OPEN','CLOSING');")
+  sim_sol=$(run_sql "$TRADE_DB" "SELECT COALESCE(SUM(sol_lamports),0) FROM sim_wallet;")
+  free_sol=$((sim_sol - reserved_sol))
+  free_sol_ui=$(run_sql "$TRADE_DB" "SELECT ($free_sol / 1000000000.0);")
+  reserved_sol_ui=$(run_sql "$TRADE_DB" "SELECT ($reserved_sol / 1000000000.0);")
+  sim_sol_ui=$(run_sql "$TRADE_DB" "SELECT ($sim_sol / 1000000000.0);")
+  echo
+  echo "== Свободный SOL (симуляция) =="
+  echo "SOL всего: $sim_sol_ui"
+  echo "SOL в резервах: $reserved_sol_ui"
+  echo "SOL свободно: $free_sol_ui"
 else
   echo "Нет данных."
 fi
