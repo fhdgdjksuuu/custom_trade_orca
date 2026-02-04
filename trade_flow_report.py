@@ -380,6 +380,84 @@ def _render_html(
     closed_blocks: List[str] = []
     open_blocks: List[str] = []
     other_blocks: List[str] = []
+
+    # Битые транзакции: trade_links со статусом FAILED и trade_events ERROR
+    failed_links = trade_conn.execute(
+        """
+        SELECT player, signature, last_error, entry_event_id, exit_event_id, updated_at_ms
+        FROM trade_links
+        WHERE status = 'FAILED'
+        ORDER BY updated_at_ms DESC
+        LIMIT 50
+        """
+    ).fetchall()
+
+    failed_positions = trade_conn.execute(
+        """
+        SELECT id, side, pool, last_error, updated_at_ms
+        FROM positions
+        WHERE state = 'FAILED'
+        ORDER BY updated_at_ms DESC
+        LIMIT 50
+        """
+    ).fetchall()
+
+    failed_events = trade_conn.execute(
+        """
+        SELECT position_id, ts_ms, event_type, details_json
+        FROM trade_events
+        WHERE event_type = 'ERROR'
+        ORDER BY ts_ms DESC
+        LIMIT 50
+        """
+    ).fetchall()
+
+    failed_links_rows = ""
+    if failed_links:
+        for r in failed_links:
+            failed_links_rows += (
+                "<tr>"
+                f"<td>{_esc(r[0])}</td>"
+                f"<td>{_esc(r[1])}</td>"
+                f"<td>{_esc(_ts_utc(r[5]))}</td>"
+                f"<td>{_esc(r[3])}</td>"
+                f"<td>{_esc(r[4])}</td>"
+                f"<td>{_esc(r[2])}</td>"
+                "</tr>"
+            )
+    else:
+        failed_links_rows = "<tr><td colspan='6'>Нет данных</td></tr>"
+
+    failed_positions_rows = ""
+    if failed_positions:
+        for r in failed_positions:
+            failed_positions_rows += (
+                "<tr>"
+                f"<td>{_esc(r[0])}</td>"
+                f"<td>{_esc(r[1])}</td>"
+                f"<td>{_esc(r[2])}</td>"
+                f"<td>{_esc(_ts_utc(r[4]))}</td>"
+                f"<td>{_esc(r[3])}</td>"
+                "</tr>"
+            )
+    else:
+        failed_positions_rows = "<tr><td colspan='5'>Нет данных</td></tr>"
+
+    failed_events_rows = ""
+    if failed_events:
+        for r in failed_events:
+            details = _safe_json_loads(r[3])
+            summary, _ = _summarize_details(details, 0, 200)
+            failed_events_rows += (
+                "<tr>"
+                f"<td>{_esc(r[0])}</td>"
+                f"<td>{_esc(_ts_utc(r[1]))}</td>"
+                f"<td>{_esc(r[2])}</td>"
+                f"<td>{_esc(summary)}</td>"
+                "</tr>"
+            )
+    else:
+        failed_events_rows = "<tr><td colspan='4'>Нет данных</td></tr>"
     for pos in positions:
         link_info = ""
         if pos.link_player or pos.link_signature:
@@ -538,6 +616,61 @@ def _render_html(
 
   <h2>Баланс симуляции</h2>
   {sim_wallet_block}
+
+  <h2>Битые транзакции</h2>
+  <div class="card">
+    <div class="k">Связи со статусом FAILED (trade_links)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>игрок</th>
+          <th>сигнатура</th>
+          <th>время</th>
+          <th>id входа</th>
+          <th>id выхода</th>
+          <th>ошибка</th>
+        </tr>
+      </thead>
+      <tbody>
+        {failed_links_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="k">Позиции в состоянии FAILED (positions)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>позиция</th>
+          <th>сторона</th>
+          <th>пул</th>
+          <th>время</th>
+          <th>ошибка</th>
+        </tr>
+      </thead>
+      <tbody>
+        {failed_positions_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="k">События ERROR (trade_events)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>позиция</th>
+          <th>время</th>
+          <th>тип</th>
+          <th>кратко</th>
+        </tr>
+      </thead>
+      <tbody>
+        {failed_events_rows}
+      </tbody>
+    </table>
+  </div>
 
   <h2>Завершённые позиции (CLOSED) — детально</h2>
   {''.join(closed_blocks) if closed_blocks else '<div class="muted">Нет завершённых позиций</div>'}
