@@ -349,6 +349,17 @@ fn compute_side(entry: &TrackerEvent) -> Result<&'static str> {
     }
 }
 
+fn compute_profit_pct(side: &str, entry_price: f64, exit_price: f64) -> Result<f64> {
+    if entry_price <= 0.0 {
+        return Err(anyhow!("entry price must be positive"));
+    }
+    match side {
+        "LONG" => Ok((exit_price - entry_price) / entry_price * 100.0),
+        "SHORT" => Ok((entry_price - exit_price) / entry_price * 100.0),
+        _ => Err(anyhow!("unknown side {side}")),
+    }
+}
+
 fn side_human(side: &str) -> &'static str {
     match side {
         "LONG" => "на рост",
@@ -364,6 +375,7 @@ fn rpc_base_url(url: &str) -> &str {
 async fn open_position(
     cfg: &Config,
     trader: &trade::Trader,
+    tracker_conn: &Connection,
     trade_conn: &Connection,
     entry: &TrackerEvent,
     pending_exit_id: Option<i64>,
@@ -476,6 +488,17 @@ async fn open_position(
         "#,
         params![position_id, now_ms(), entry.player, entry.signature],
     )?;
+
+    if let Some(entry_price) = entry.price {
+        trade_conn.execute(
+            r#"
+            UPDATE positions
+            SET entry_price = ?1
+            WHERE id = ?2
+            "#,
+            params![entry_price, position_id],
+        )?;
+    }
     println!(
         "✅ Открыта позиция {}: player={} sig={} position_id={}",
         side_human(side),
@@ -491,7 +514,7 @@ async fn open_position(
             entry.player, entry.signature, exit_event_id
         );
         close_position(
-            cfg,
+            tracker_conn,
             trader,
             trade_conn,
             &entry.player,
@@ -506,7 +529,7 @@ async fn open_position(
 }
 
 async fn close_position(
-    _cfg: &Config,
+    tracker_conn: &Connection,
     trader: &trade::Trader,
     trade_conn: &Connection,
     player: &str,
@@ -603,6 +626,39 @@ async fn close_position(
         "#,
         params![now_ms(), player, signature],
     )?;
+
+    let profit_result = record_profit(
+        tracker_conn,
+        trade_conn,
+        position_id,
+        &side,
+        player,
+        signature,
+        exit_event_id,
+    );
+    match profit_result {
+        Ok(Some(pct)) => {
+            println!(
+                "💹 Профит по позиции: player={} sig={} сторона={} profit={:.4}%",
+                player,
+                signature,
+                side_human(&side),
+                pct
+            );
+        }
+        Ok(None) => {
+            println!(
+                "⚠️ Профит не рассчитан: отсутствуют цены (player={} sig={})",
+                player, signature
+            );
+        }
+        Err(err) => {
+            println!(
+                "⚠️ Ошибка расчёта профита: player={} sig={} err={}",
+                player, signature, err
+            );
+        }
+    }
     println!(
         "✅ Позиция закрыта {}: player={} sig={} position_id={}",
         side_human(&side),
@@ -614,9 +670,74 @@ async fn close_position(
     Ok(())
 }
 
+fn record_profit(
+    tracker_conn: &Connection,
+    trade_conn: &Connection,
+    position_id: i64,
+    side: &str,
+    player: &str,
+    signature: &str,
+    exit_event_id: i64,
+) -> Result<Option<f64>> {
+    let entry = find_entry_event(tracker_conn, player, signature)?;
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let exit = fetch_event_by_id(tracker_conn, exit_event_id)?;
+    let Some(exit) = exit else {
+        return Ok(None);
+    };
+
+    let entry_price = match entry.price {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let exit_price = match exit.price {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let profit_pct = compute_profit_pct(side, entry_price, exit_price)?;
+    let now = now_ms();
+
+    trade_conn.execute(
+        r#"
+        UPDATE positions
+        SET entry_price = ?1,
+            exit_price = ?2,
+            profit_pct = ?3,
+            updated_at_ms = ?4
+        WHERE id = ?5
+        "#,
+        params![entry_price, exit_price, profit_pct, now, position_id],
+    )?;
+
+    let details_json = serde_json::to_string(&serde_json::json!({
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "profit_pct": profit_pct,
+        "side": side,
+        "player": player,
+        "signature": signature,
+        "entry_event_id": entry.id,
+        "exit_event_id": exit_event_id
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+    trade_conn.execute(
+        r#"
+        INSERT INTO trade_events (position_id, ts_ms, event_type, details_json)
+        VALUES (?1, ?2, 'PROFIT', ?3)
+        "#,
+        params![position_id, now, details_json],
+    )?;
+
+    Ok(Some(profit_pct))
+}
+
 async fn handle_entry_event(
     cfg: &Config,
     trader: &trade::Trader,
+    tracker_conn: &Connection,
     players_conn: &Connection,
     trade_conn: &Connection,
     entry: &TrackerEvent,
@@ -637,7 +758,16 @@ async fn handle_entry_event(
         );
         return Ok(());
     }
-    open_position(cfg, trader, trade_conn, entry, pending_exit_id, dry_run).await
+    open_position(
+        cfg,
+        trader,
+        tracker_conn,
+        trade_conn,
+        entry,
+        pending_exit_id,
+        dry_run,
+    )
+    .await
 }
 
 async fn handle_target_event(
@@ -671,7 +801,7 @@ async fn handle_target_event(
     if let Some(status) = existing {
         if status == "OPEN" {
             return close_position(
-                cfg,
+                tracker_conn,
                 trader,
                 trade_conn,
                 &event.player,
@@ -724,6 +854,7 @@ async fn handle_target_event(
     handle_entry_event(
         cfg,
         trader,
+        tracker_conn,
         players_conn,
         trade_conn,
         &entry,
@@ -823,6 +954,7 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
                     handle_entry_event(
                         &cfg,
                         &trader,
+                        &tracker_conn,
                         &players_conn,
                         &trade_conn,
                         &event,
@@ -932,6 +1064,7 @@ pub async fn run_from_signals(
                 handle_entry_event(
                     &cfg,
                     &trader,
+                    &tracker_conn,
                     &players_conn,
                     &trade_conn,
                     &event,

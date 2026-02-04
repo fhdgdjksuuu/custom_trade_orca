@@ -223,6 +223,27 @@ impl TradeDb {
             "#,
         )
         .context("init trade db schema")?;
+        Self::ensure_positions_columns(&conn)?;
+        Ok(())
+    }
+
+    fn ensure_positions_columns(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(positions)")?;
+        let mut cols = HashSet::new();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for col in rows {
+            cols.insert(col?);
+        }
+
+        if !cols.contains("entry_price") {
+            conn.execute("ALTER TABLE positions ADD COLUMN entry_price REAL", [])?;
+        }
+        if !cols.contains("exit_price") {
+            conn.execute("ALTER TABLE positions ADD COLUMN exit_price REAL", [])?;
+        }
+        if !cols.contains("profit_pct") {
+            conn.execute("ALTER TABLE positions ADD COLUMN profit_pct REAL", [])?;
+        }
         Ok(())
     }
 
@@ -402,8 +423,8 @@ impl TradeDb {
                     close_lvb,
                     reserved_usdc_i64,
                     reserved_sol_i64,
-                    _sol_pos_i64,
-                    _usdc_pos_i64,
+                    sol_pos_i64,
+                    usdc_pos_i64,
                 ) in rows
                 {
                     let payer = Pubkey::from_str(&payer_s).unwrap_or_default();
@@ -446,6 +467,8 @@ impl TradeDb {
                                     &side,
                                     reserved_usdc_i64,
                                     reserved_sol_i64,
+                                    sol_pos_i64,
+                                    usdc_pos_i64,
                                     sig,
                                 )
                                 .await?;
@@ -509,6 +532,8 @@ impl TradeDb {
         side: &str,
         reserved_usdc_i64: i64,
         reserved_sol_i64: i64,
+        sol_position_i64: i64,
+        usdc_position_i64: i64,
         sig: Signature,
     ) -> Result<()> {
         let tx_json = http.get_transaction_json(&sig).await?;
@@ -529,6 +554,8 @@ impl TradeDb {
 
         let reserved_sol_budget = u64::try_from(reserved_sol_i64).unwrap_or(0);
         let _reserved_usdc_budget = u64::try_from(reserved_usdc_i64).unwrap_or(0);
+        let stored_sol_position = u64::try_from(sol_position_i64).unwrap_or(0);
+        let stored_usdc_position = u64::try_from(usdc_position_i64).unwrap_or(0);
         let now = Self::now_ms();
 
         let mut conn = self.open_conn()?;
@@ -536,8 +563,11 @@ impl TradeDb {
 
         match side {
             "LONG" => {
-                let sol_position =
-                    u64::try_from(sol_delta).map_err(|_| anyhow!("expected positive sol delta"))?;
+                let sol_position = if sol_delta > 0 {
+                    u64::try_from(sol_delta).unwrap_or(stored_sol_position)
+                } else {
+                    stored_sol_position
+                };
                 let new_reserved_sol = sol_position
                     .checked_add(reserved_sol_budget)
                     .ok_or_else(|| anyhow!("reserved sol overflow"))?;
@@ -572,10 +602,16 @@ impl TradeDb {
                 )?;
             }
             "SHORT" => {
-                let sol_spent = u64::try_from(-sol_delta)
-                    .map_err(|_| anyhow!("expected negative sol delta for short"))?;
-                let usdc_received = u64::try_from(usdc_delta)
-                    .map_err(|_| anyhow!("expected positive usdc delta for short"))?;
+                let sol_spent = if sol_delta < 0 {
+                    u64::try_from(-sol_delta).unwrap_or(stored_sol_position)
+                } else {
+                    stored_sol_position
+                };
+                let usdc_received = if usdc_delta > 0 {
+                    u64::try_from(usdc_delta).unwrap_or(stored_usdc_position)
+                } else {
+                    stored_usdc_position
+                };
                 tx.execute(
                     r#"
                     UPDATE positions
@@ -1371,6 +1407,13 @@ fn exact_in_min_out(quote: &SwapQuote) -> Result<u64> {
     }
 }
 
+fn exact_in_est_out(quote: &SwapQuote) -> Result<u64> {
+    match quote {
+        SwapQuote::ExactIn(q) => Ok(q.token_est_out),
+        _ => Err(anyhow!("expected ExactIn quote")),
+    }
+}
+
 fn build_simulation_addresses(
     payer: &Pubkey,
     token_accounts: &[Pubkey],
@@ -1639,6 +1682,7 @@ impl Trader {
             ..
         } = swap;
         let min_out = exact_in_min_out(&quote)?;
+        let est_out = exact_in_est_out(&quote)?;
 
         let mut instructions =
             Vec::with_capacity(swap_instructions.len() + if wsol_ata_exists { 1 } else { 0 });
@@ -1717,7 +1761,7 @@ impl Trader {
                  reserved_usdc, reserved_sol_lamports, sol_position_lamports, usdc_position,
                  open_sig, open_last_valid_block_height)
                 VALUES
-                (?1, ?2, 'LONG', 'OPENING', ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, ?9, ?10)
+                (?1, ?2, 'LONG', 'OPENING', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)
                 "#,
                     params![
                         payer_pubkey.to_string(),
@@ -1728,6 +1772,7 @@ impl Trader {
                         now,
                         reserved_usdc_i64,
                         reserved_sol_i64,
+                        u64_to_i64(est_out, "sol_position_lamports")?,
                         tx_sig.to_string(),
                         last_valid_i64
                     ],
@@ -1780,7 +1825,8 @@ impl Trader {
                     "swap_type": "ExactIn",
                     "amount": usdc_amount_base,
                     "slippage_bps": slippage_bps,
-                    "quote_min_out": min_out
+                    "quote_min_out": min_out,
+                    "quote_est_out": est_out
                 }),
             )?;
             db_tx.commit()?;
@@ -1896,11 +1942,7 @@ impl Trader {
             }
         }
 
-        let sol_position = if delta_sol > 0 {
-            u64::try_from(delta_sol).context("sol delta overflow")?
-        } else {
-            return Err(anyhow!("expected positive sol delta for open_long"));
-        };
+        let sol_position = est_out;
         let reserved_sol_after_open = sol_position
             .checked_add(fee_plus_rent)
             .ok_or_else(|| anyhow!("reserved_sol_lamports overflow"))?;
@@ -2429,7 +2471,7 @@ impl Trader {
                  reserved_usdc, reserved_sol_lamports, sol_position_lamports, usdc_position,
                  open_sig, open_last_valid_block_height)
                 VALUES
-                (?1, ?2, 'SHORT', 'OPENING', ?3, ?4, ?5, ?6, 0, ?7, 0, ?8, ?9, ?10)
+                (?1, ?2, 'SHORT', 'OPENING', ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11)
                 "#,
                     params![
                         payer_pubkey.to_string(),
@@ -2439,6 +2481,7 @@ impl Trader {
                         now,
                         now,
                         reserved_sol_i64,
+                        u64_to_i64(est_sol_in, "sol_position_lamports")?,
                         usdc_out_i64,
                         tx_sig.to_string(),
                         last_valid_i64
@@ -2606,16 +2649,7 @@ impl Trader {
             }
         }
 
-        let sol_spent = if delta_sol < 0 {
-            u64::try_from(-delta_sol).context("sol delta overflow")?
-        } else {
-            return Err(anyhow!("expected negative sol delta for open_short"));
-        };
-        let _usdc_received = if delta_usdc > 0 {
-            u64::try_from(delta_usdc).context("usdc delta overflow")?
-        } else {
-            return Err(anyhow!("expected positive usdc delta for open_short"));
-        };
+        let sol_spent = est_sol_in;
         let reserved_sol_after_open = fee_plus_rent;
 
         {
