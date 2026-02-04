@@ -213,8 +213,8 @@ def _count(conn: sqlite3.Connection, sql: str) -> int:
     return int(conn.execute(sql).fetchone()[0])
 
 
-def _sum_float(conn: sqlite3.Connection, sql: str) -> float:
-    row = conn.execute(sql).fetchone()
+def _sum_float(conn: sqlite3.Connection, sql: str, params: Tuple[Any, ...] = ()) -> float:
+    row = conn.execute(sql, params).fetchone()
     return float(row[0] or 0.0)
 
 
@@ -252,11 +252,13 @@ def _build_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
     summary["sum_profit_usdc"] = _sum_float(
         conn,
         "SELECT COALESCE(SUM(profit_pct * ? / 100.0),0) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL",
+        (USDC_PER_TRADE,),
     )
 
     summary["sum_profit_sol"] = _sum_float(
         conn,
         "SELECT COALESCE(SUM((profit_pct * ? / 100.0) * exit_price),0) FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL AND exit_price IS NOT NULL",
+        (USDC_PER_TRADE,),
     )
 
     return summary
