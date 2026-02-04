@@ -43,6 +43,7 @@ use std::{
 };
 
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+const SIMULATION_FEE_LAMPORTS: u64 = 5000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
@@ -978,6 +979,7 @@ async fn build_transaction_with_fee(
     payer: &Keypair,
     instructions: &[Instruction],
     extra_signers: &[Keypair],
+    mode: ExecMode,
 ) -> Result<(Transaction, u64, u64)> {
     let (blockhash, last_valid_block_height) = rpc
         .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
@@ -996,10 +998,13 @@ async fn build_transaction_with_fee(
         &signer_refs,
         blockhash,
     );
-    let fee = rpc
-        .get_fee_for_message(tx.message())
-        .await
-        .context("get_fee_for_message")?;
+    let fee = match mode {
+        ExecMode::Simulate => SIMULATION_FEE_LAMPORTS,
+        ExecMode::Live => rpc
+            .get_fee_for_message(tx.message())
+            .await
+            .context("get_fee_for_message")?,
+    };
 
     Ok((tx, last_valid_block_height, fee))
 }
@@ -1400,9 +1405,14 @@ impl Trader {
         instructions.extend(post_instructions);
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
-        let (transaction, last_valid_block_height, fee) =
-            build_transaction_with_fee(rpc, &self.payer, &instructions, &additional_signers)
-                .await?;
+        let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
+            rpc,
+            &self.payer,
+            &instructions,
+            &additional_signers,
+            self.mode,
+        )
+        .await?;
         let tx_sig = transaction.signatures.get(0).cloned().unwrap_or_default();
         let fee_plus_rent = fee
             .checked_add(rent_budget)
@@ -1794,9 +1804,14 @@ impl Trader {
         instructions.extend(post_instructions);
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
-        let (transaction, last_valid_block_height, fee) =
-            build_transaction_with_fee(rpc, &self.payer, &instructions, &additional_signers)
-                .await?;
+        let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
+            rpc,
+            &self.payer,
+            &instructions,
+            &additional_signers,
+            self.mode,
+        )
+        .await?;
         let tx_sig = transaction.signatures.get(0).cloned().unwrap_or_default();
         let fee_plus_rent = fee
             .checked_add(rent_budget)
@@ -2127,9 +2142,14 @@ impl Trader {
         instructions.extend(post_instructions);
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
-        let (transaction, last_valid_block_height, fee) =
-            build_transaction_with_fee(rpc, &self.payer, &instructions, &additional_signers)
-                .await?;
+        let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
+            rpc,
+            &self.payer,
+            &instructions,
+            &additional_signers,
+            self.mode,
+        )
+        .await?;
         let tx_sig = transaction.signatures.get(0).cloned().unwrap_or_default();
         let fee_plus_rent = fee
             .checked_add(rent_budget)
@@ -2521,9 +2541,14 @@ impl Trader {
         instructions.extend(post_instructions);
 
         let rent_budget = rent_budget_for_atas(rpc, &[usdc_ata, wsol_ata]).await?;
-        let (transaction, last_valid_block_height, fee) =
-            build_transaction_with_fee(rpc, &self.payer, &instructions, &additional_signers)
-                .await?;
+        let (transaction, last_valid_block_height, fee) = build_transaction_with_fee(
+            rpc,
+            &self.payer,
+            &instructions,
+            &additional_signers,
+            self.mode,
+        )
+        .await?;
         let tx_sig = transaction.signatures.get(0).cloned().unwrap_or_default();
         let fee_plus_rent = fee
             .checked_add(rent_budget)
