@@ -49,7 +49,7 @@ const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const SIMULATION_FEE_LAMPORTS: u64 = 5000;
 const RPC_RATE_LIMIT_PER_SEC: usize = 9;
 const RPC_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
-const SWAP_INSTRUCTIONS_RETRY_DELAY_MS: u64 = 200;
+const SWAP_INSTRUCTIONS_RETRY_DELAY_MS: u64 = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
