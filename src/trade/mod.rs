@@ -49,6 +49,7 @@ const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const SIMULATION_FEE_LAMPORTS: u64 = 5000;
 const RPC_RATE_LIMIT_PER_SEC: usize = 9;
 const RPC_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+const SWAP_INSTRUCTIONS_RETRY_DELAY_MS: u64 = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
@@ -1281,6 +1282,51 @@ fn format_orca_swap_error(err: &(dyn std::error::Error + 'static)) -> String {
     parts.join(" | ")
 }
 
+async fn swap_instructions_with_retry(
+    rpc: &RpcClient,
+    whirlpool: Pubkey,
+    amount: u64,
+    specified_mint: Pubkey,
+    swap_type: SwapType,
+    slippage_bps: u16,
+    signer: Pubkey,
+) -> Result<SwapInstructions> {
+    let first = swap_instructions(
+        rpc,
+        whirlpool,
+        amount,
+        specified_mint,
+        swap_type.clone(),
+        Some(slippage_bps),
+        Some(signer),
+    )
+    .await;
+    match first {
+        Ok(swap) => Ok(swap),
+        Err(first_err) => {
+            tokio::time::sleep(Duration::from_millis(SWAP_INSTRUCTIONS_RETRY_DELAY_MS)).await;
+            let second = swap_instructions(
+                rpc,
+                whirlpool,
+                amount,
+                specified_mint,
+                swap_type,
+                Some(slippage_bps),
+                Some(signer),
+            )
+            .await;
+            match second {
+                Ok(swap) => Ok(swap),
+                Err(second_err) => Err(anyhow!(
+                    "orca swap_instructions failed after retry: {} | {}",
+                    format_orca_swap_error(first_err.as_ref()),
+                    format_orca_swap_error(second_err.as_ref())
+                )),
+            }
+        }
+    }
+}
+
 async fn build_swap_instructions(
     rpc: &RpcClient,
     payer: &Keypair,
@@ -1291,22 +1337,16 @@ async fn build_swap_instructions(
     slippage_bps: u16,
 ) -> Result<SwapInstructions> {
     configure_orca(&payer.pubkey())?;
-    let swap = swap_instructions(
+    let swap = swap_instructions_with_retry(
         rpc,
         whirlpool,
         amount,
         specified_mint,
         swap_type,
-        Some(slippage_bps),
-        Some(payer.pubkey()),
+        slippage_bps,
+        payer.pubkey(),
     )
-    .await
-    .map_err(|e| {
-        anyhow!(
-            "orca swap_instructions failed: {}",
-            format_orca_swap_error(e.as_ref())
-        )
-    })?;
+    .await?;
     Ok(swap)
 }
 
@@ -1424,22 +1464,16 @@ async fn swap_core(
     ));
     let rpc = build_rate_limited_rpc_client(rpc_url, limiter);
 
-    let swap = swap_instructions(
+    let swap = swap_instructions_with_retry(
         &rpc,
         whirlpool,
         amount,
         specified_mint,
         swap_type,
-        Some(slippage_bps),
-        Some(payer.pubkey()),
+        slippage_bps,
+        payer.pubkey(),
     )
-    .await
-    .map_err(|e| {
-        anyhow!(
-            "orca swap_instructions failed: {}",
-            format_orca_swap_error(e.as_ref())
-        )
-    })?;
+    .await?;
 
     let mut ixs = Vec::with_capacity(
         pre_instructions.len() + swap.instructions.len() + post_instructions.len(),
