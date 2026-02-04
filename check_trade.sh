@@ -12,6 +12,7 @@ fi
 TRACKER_DB="${TRACKER_DB:-tracker.db}"
 TRADE_DB="${TRADE_DB:-trade.db}"
 PLAYERS_DB="${PLAYERS_DB:-players.db}"
+EXPECTED_POOL="${EXPECTED_POOL:-}"
 
 if [ ! -f "$TRACKER_DB" ]; then
   echo "Нет файла $TRACKER_DB"
@@ -32,12 +33,6 @@ run_sql() {
   sqlite3 -readonly "$db" "$sql"
 }
 
-fmt_ts() {
-  local db="$1"
-  local sql="$2"
-  run_sql "$db" "$sql"
-}
-
 echo "== Файлы БД =="
 ls -lh "$TRACKER_DB" "$TRADE_DB" "$PLAYERS_DB"
 echo
@@ -49,10 +44,27 @@ open_by_signal=$(run_sql "$TRACKER_DB" "SELECT COUNT(1) FROM events e WHERE e.ac
 last_tracker_ts=$(run_sql "$TRACKER_DB" "SELECT COALESCE(MAX(ts_ms),0) FROM events;")
 last_tracker_ts_h=$(run_sql "$TRACKER_DB" "SELECT COALESCE(datetime(MAX(ts_ms)/1000,'unixepoch'), 'нет') FROM events;")
 
+if [ -n "$EXPECTED_POOL" ]; then
+  entry_expected=$(run_sql "$TRACKER_DB" "SELECT COUNT(*) FROM events WHERE action='ENTRY_SIGNAL' AND whirlpool='$EXPECTED_POOL';")
+fi
+
 echo "ENTRY_SIGNAL: $entry_count"
 echo "TARGET_HIT:   $target_count"
 echo "Открытых по сигналам: $open_by_signal"
+if [ -n "$EXPECTED_POOL" ]; then
+  echo "ENTRY_SIGNAL по ожидаемому пулу: $entry_expected"
+fi
 echo "Последнее событие: $last_tracker_ts_h (ts_ms=$last_tracker_ts)"
+
+last_entry_pool=$(run_sql "$TRACKER_DB" "SELECT whirlpool FROM events WHERE action='ENTRY_SIGNAL' ORDER BY ts_ms DESC LIMIT 1;")
+if [ -n "$last_entry_pool" ]; then
+  echo "Последний ENTRY_SIGNAL пул: $last_entry_pool"
+  if [ -n "$EXPECTED_POOL" ] && [ "$last_entry_pool" != "$EXPECTED_POOL" ]; then
+    echo "⚠️ Пул не совпадает с ожидаемым."
+  fi
+else
+  echo "ENTRY_SIGNAL отсутствуют."
+fi
 
 if [ "$entry_count" -gt 0 ] || [ "$target_count" -gt 0 ]; then
   echo
@@ -82,6 +94,18 @@ fi
 
 echo
 
+echo "== Отказы по входам (tracker.db) =="
+reject_count=$(run_sql "$TRACKER_DB" "SELECT COUNT(*) FROM events WHERE action='ENTRY_REJECT';")
+if [ "$reject_count" -gt 0 ]; then
+  run_sql "$TRACKER_DB" "SELECT action, COUNT(*) FROM events WHERE action='ENTRY_REJECT' GROUP BY action;"
+  echo "Последние 5 отказов:"
+  run_sql "$TRACKER_DB" "SELECT ts_ms, action, player, signature, details_json FROM events WHERE action='ENTRY_REJECT' ORDER BY ts_ms DESC LIMIT 5;"
+else
+  echo "Нет данных."
+fi
+
+echo
+
 echo "== Сводка торговли (trade.db) =="
 trade_links_count=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM trade_links;")
 positions_count=$(run_sql "$TRADE_DB" "SELECT COUNT(*) FROM positions;")
@@ -105,6 +129,15 @@ echo
 
 echo "== Состояния позиций (trade.db) =="
 run_sql "$TRADE_DB" "WITH states(s) AS (VALUES('OPENING'),('OPEN'),('CLOSING'),('CLOSED'),('FAILED')) SELECT s AS state, COALESCE(c.cnt,0) FROM states s LEFT JOIN (SELECT state, COUNT(*) cnt FROM positions GROUP BY state) c ON c.state=s;"
+
+echo
+
+echo "== Последние связи торговли (trade.db) =="
+if [ "$trade_links_count" -gt 0 ]; then
+  run_sql "$TRADE_DB" "SELECT player, signature, status, position_id, datetime(updated_at_ms/1000,'unixepoch') FROM trade_links ORDER BY updated_at_ms DESC LIMIT 10;"
+else
+  echo "Нет данных."
+fi
 
 echo
 
