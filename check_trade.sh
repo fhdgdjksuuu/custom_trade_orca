@@ -188,6 +188,18 @@ fi
 
 echo
 
+echo "== Битые транзакции по пулам (trade.db + tracker.db) =="
+has_events=$(run_sql "$TRACKER_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='events';")
+if [ "$trade_links_count" -gt 0 ] && [ "$has_events" = "events" ]; then
+  run_sql "$TRADE_DB" "ATTACH '$TRACKER_DB' AS t; SELECT COALESCE(e.whirlpool,'(unknown)') AS pool, COUNT(*) AS cnt FROM trade_links tl LEFT JOIN t.events e ON e.id=tl.entry_event_id WHERE tl.status='FAILED' GROUP BY pool ORDER BY cnt DESC;"
+  echo "Причины (top 30):"
+  run_sql "$TRADE_DB" "ATTACH '$TRACKER_DB' AS t; SELECT COALESCE(e.whirlpool,'(unknown)') AS pool, COALESCE(tl.last_error,'') AS err, COUNT(*) AS cnt FROM trade_links tl LEFT JOIN t.events e ON e.id=tl.entry_event_id WHERE tl.status='FAILED' GROUP BY pool, err ORDER BY cnt DESC LIMIT 30;"
+else
+  echo "Нет данных (либо нет FAILED, либо нет таблицы events в tracker.db)."
+fi
+
+echo
+
 echo "== Последние события по сделкам (trade.db) =="
 if [ "$trade_events_count" -gt 0 ]; then
   run_sql "$TRADE_DB" "SELECT e.ts_ms, p.side, p.state, e.event_type FROM trade_events e JOIN positions p ON p.id=e.position_id ORDER BY e.ts_ms DESC LIMIT 20;"
