@@ -325,16 +325,20 @@ def _render_html(
     summary_rows = "".join(
         f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
         for k, v in [
-            ("positions", summary.get("positions")),
-            ("trade_links", summary.get("trade_links")),
-            ("trade_events", summary.get("trade_events")),
-            ("sim_wallet", summary.get("sim_wallet")),
-            ("open_committed", summary.get("open_committed")),
-            ("close_committed", summary.get("close_committed")),
-            ("profit_events", summary.get("profit_events")),
-            ("closed_positions", summary.get("closed_positions")),
-            ("open_positions", summary.get("open_positions")),
-            ("profit_positions", summary.get("profit_positions")),
+            ("Всего позиций", summary.get("positions")),
+            ("Всего связей", summary.get("trade_links")),
+            ("Всего событий", summary.get("trade_events")),
+            ("Записей sim_wallet", summary.get("sim_wallet")),
+            ("Открыто (OPEN)", summary.get("open_positions")),
+            ("Закрыто (CLOSED)", summary.get("closed_positions")),
+            ("OPEN_COMMITTED", summary.get("open_committed")),
+            ("CLOSE_COMMITTED", summary.get("close_committed")),
+            ("Событий PROFIT", summary.get("profit_events")),
+            ("Позиций с profit_pct", summary.get("profit_positions")),
+            ("USDC на сделку", USDC_PER_TRADE),
+            ("Прибыль USDC (сумма)", f"{summary.get('sum_profit_usdc', 0):.12g}"),
+            ("Прибыль SOL (сумма)", f"{summary.get('sum_profit_sol', 0):.12g}"),
+            ("Последнее событие торговли", _ts_utc(summary.get("last_trade_ts"))),
         ]
     )
 
@@ -362,26 +366,30 @@ def _render_html(
         </div>
         """
 
-    profit_block = f"""
-    <div class="grid">
-      <div><span class="k">USDC per trade:</span> <span class="v">{USDC_PER_TRADE}</span></div>
-      <div><span class="k">Profit USDC (sum):</span> <span class="v">{summary.get('sum_profit_usdc', 0):.12g}</span></div>
-      <div><span class="k">Profit SOL (sum):</span> <span class="v">{summary.get('sum_profit_sol', 0):.12g}</span></div>
-      <div><span class="k">Last trade event:</span> <span class="v">{_esc(_ts_utc(summary.get('last_trade_ts')))}</span></div>
+    profit_block = """
+    <div class="muted">
+      Прибыль считается строго по ценам входа/выхода (WSOL/токен).
+      Формула:
+      <ul>
+        <li>LONG: (цена_выхода − цена_входа) / цена_входа * 100</li>
+        <li>SHORT: (цена_входа − цена_выхода) / цена_входа * 100</li>
+      </ul>
     </div>
     """
 
-    position_blocks: List[str] = []
+    closed_blocks: List[str] = []
+    open_blocks: List[str] = []
+    other_blocks: List[str] = []
     for pos in positions:
         link_info = ""
         if pos.link_player or pos.link_signature:
             link_info = f"""
             <div class="grid">
-              <div><span class="k">link player:</span> <span class="v">{_esc(pos.link_player)}</span></div>
-              <div><span class="k">link signature:</span> <span class="v">{_esc(pos.link_signature)}</span></div>
-              <div><span class="k">link status:</span> <span class="v">{_esc(pos.link_status)}</span></div>
-              <div><span class="k">entry_event_id:</span> <span class="v">{_esc(pos.link_entry_event_id)}</span></div>
-              <div><span class="k">exit_event_id:</span> <span class="v">{_esc(pos.link_exit_event_id)}</span></div>
+              <div><span class="k">игрок:</span> <span class="v">{_esc(pos.link_player)}</span></div>
+              <div><span class="k">сигнатура:</span> <span class="v">{_esc(pos.link_signature)}</span></div>
+              <div><span class="k">статус связи:</span> <span class="v">{_esc(pos.link_status)}</span></div>
+              <div><span class="k">id входа:</span> <span class="v">{_esc(pos.link_entry_event_id)}</span></div>
+              <div><span class="k">id выхода:</span> <span class="v">{_esc(pos.link_exit_event_id)}</span></div>
             </div>
             """
 
@@ -391,15 +399,15 @@ def _render_html(
             if ev is not None:
                 entry_block = f"""
                 <div class="card">
-                  <div class="k">ENTRY_SIGNAL</div>
+                  <div class="k">ENTRY_SIGNAL (сигнал входа)</div>
                   <div class="grid">
                     <div><span class="k">id:</span> <span class="v">{ev['id']}</span></div>
-                    <div><span class="k">ts:</span> <span class="v">{_esc(_ts_utc(ev['ts_ms']))}</span></div>
-                    <div><span class="k">player:</span> <span class="v">{_esc(ev['player'])}</span></div>
-                    <div><span class="k">sig:</span> <span class="v">{_esc(ev['signature'])}</span></div>
-                    <div><span class="k">whirlpool:</span> <span class="v">{_esc(ev['whirlpool'])}</span></div>
-                    <div><span class="k">price:</span> <span class="v">{_fmt_float(ev['price'])}</span></div>
-                    <div><span class="k">target_price:</span> <span class="v">{_fmt_float(ev['target_price'])}</span></div>
+                    <div><span class="k">время:</span> <span class="v">{_esc(_ts_utc(ev['ts_ms']))}</span></div>
+                    <div><span class="k">игрок:</span> <span class="v">{_esc(ev['player'])}</span></div>
+                    <div><span class="k">сигнатура:</span> <span class="v">{_esc(ev['signature'])}</span></div>
+                    <div><span class="k">пул:</span> <span class="v">{_esc(ev['whirlpool'])}</span></div>
+                    <div><span class="k">цена входа:</span> <span class="v">{_fmt_float(ev['price'])}</span></div>
+                    <div><span class="k">цель:</span> <span class="v">{_fmt_float(ev['target_price'])}</span></div>
                   </div>
                 </div>
                 """
@@ -410,15 +418,15 @@ def _render_html(
             if ev is not None:
                 exit_block = f"""
                 <div class="card">
-                  <div class="k">TARGET_HIT</div>
+                  <div class="k">TARGET_HIT (сигнал выхода)</div>
                   <div class="grid">
                     <div><span class="k">id:</span> <span class="v">{ev['id']}</span></div>
-                    <div><span class="k">ts:</span> <span class="v">{_esc(_ts_utc(ev['ts_ms']))}</span></div>
-                    <div><span class="k">player:</span> <span class="v">{_esc(ev['player'])}</span></div>
-                    <div><span class="k">sig:</span> <span class="v">{_esc(ev['signature'])}</span></div>
-                    <div><span class="k">whirlpool:</span> <span class="v">{_esc(ev['whirlpool'])}</span></div>
-                    <div><span class="k">price:</span> <span class="v">{_fmt_float(ev['price'])}</span></div>
-                    <div><span class="k">target_price:</span> <span class="v">{_fmt_float(ev['target_price'])}</span></div>
+                    <div><span class="k">время:</span> <span class="v">{_esc(_ts_utc(ev['ts_ms']))}</span></div>
+                    <div><span class="k">игрок:</span> <span class="v">{_esc(ev['player'])}</span></div>
+                    <div><span class="k">сигнатура:</span> <span class="v">{_esc(ev['signature'])}</span></div>
+                    <div><span class="k">пул:</span> <span class="v">{_esc(ev['whirlpool'])}</span></div>
+                    <div><span class="k">цена выхода:</span> <span class="v">{_fmt_float(ev['price'])}</span></div>
+                    <div><span class="k">цель:</span> <span class="v">{_fmt_float(ev['target_price'])}</span></div>
                   </div>
                 </div>
                 """
@@ -440,11 +448,11 @@ def _render_html(
 
         errors_block = ""
         if pos.last_error:
-            errors_block += f"<div class='card'><div class='k'>position_error</div><div class='v'>{_esc(pos.last_error)}</div></div>"
+            errors_block += f"<div class='card'><div class='k'>ошибка позиции</div><div class='v'>{_esc(pos.last_error)}</div></div>"
         if pos.link_error:
-            errors_block += f"<div class='card'><div class='k'>link_error</div><div class='v'>{_esc(pos.link_error)}</div></div>"
+            errors_block += f"<div class='card'><div class='k'>ошибка связи</div><div class='v'>{_esc(pos.link_error)}</div></div>"
 
-        position_blocks.append(
+        block = (
             f"""
             <details class="card">
               <summary>
@@ -452,32 +460,32 @@ def _render_html(
                 <span class="pill">{_esc(pos.side)}</span>
                 <span class="pill">{_esc(pos.state)}</span>
                 <span class="pill">profit_pct={_fmt_float(pos.profit_pct, 6)}</span>
-                <span class="pill">player={_esc(pos.link_player)}</span>
+                <span class="pill">игрок={_esc(pos.link_player)}</span>
               </summary>
               <div class="grid">
-                <div><span class="k">payer:</span> <span class="v">{_esc(pos.payer)}</span></div>
-                <div><span class="k">pool:</span> <span class="v">{_esc(pos.pool)}</span></div>
-                <div><span class="k">mode:</span> <span class="v">{_esc(pos.mode)}</span></div>
-                <div><span class="k">slippage_bps:</span> <span class="v">{pos.slippage_bps}</span></div>
-                <div><span class="k">created:</span> <span class="v">{_esc(_ts_utc(pos.created_at_ms))}</span></div>
-                <div><span class="k">updated:</span> <span class="v">{_esc(_ts_utc(pos.updated_at_ms))}</span></div>
-                <div><span class="k">reserved_usdc:</span> <span class="v">{pos.reserved_usdc}</span></div>
-                <div><span class="k">reserved_sol_lamports:</span> <span class="v">{pos.reserved_sol_lamports}</span></div>
-                <div><span class="k">sol_position_lamports:</span> <span class="v">{pos.sol_position_lamports}</span></div>
-                <div><span class="k">usdc_position:</span> <span class="v">{pos.usdc_position}</span></div>
-                <div><span class="k">entry_price:</span> <span class="v">{_fmt_float(pos.entry_price)}</span></div>
-                <div><span class="k">exit_price:</span> <span class="v">{_fmt_float(pos.exit_price)}</span></div>
-                <div><span class="k">open_sig:</span> <span class="v">{_esc(pos.open_sig)}</span></div>
-                <div><span class="k">close_sig:</span> <span class="v">{_esc(pos.close_sig)}</span></div>
-                <div><span class="k">open_lvb:</span> <span class="v">{_esc(pos.open_last_valid_block_height)}</span></div>
-                <div><span class="k">close_lvb:</span> <span class="v">{_esc(pos.close_last_valid_block_height)}</span></div>
+                <div><span class="k">кошелёк:</span> <span class="v">{_esc(pos.payer)}</span></div>
+                <div><span class="k">пул:</span> <span class="v">{_esc(pos.pool)}</span></div>
+                <div><span class="k">режим:</span> <span class="v">{_esc(pos.mode)}</span></div>
+                <div><span class="k">проскальзывание (б.п.):</span> <span class="v">{pos.slippage_bps}</span></div>
+                <div><span class="k">создано:</span> <span class="v">{_esc(_ts_utc(pos.created_at_ms))}</span></div>
+                <div><span class="k">обновлено:</span> <span class="v">{_esc(_ts_utc(pos.updated_at_ms))}</span></div>
+                <div><span class="k">резерв USDC:</span> <span class="v">{pos.reserved_usdc}</span></div>
+                <div><span class="k">резерв SOL (лампорты):</span> <span class="v">{pos.reserved_sol_lamports}</span></div>
+                <div><span class="k">позиция SOL (лампорты):</span> <span class="v">{pos.sol_position_lamports}</span></div>
+                <div><span class="k">позиция USDC:</span> <span class="v">{pos.usdc_position}</span></div>
+                <div><span class="k">цена входа:</span> <span class="v">{_fmt_float(pos.entry_price)}</span></div>
+                <div><span class="k">цена выхода:</span> <span class="v">{_fmt_float(pos.exit_price)}</span></div>
+                <div><span class="k">сигнатура входа:</span> <span class="v">{_esc(pos.open_sig)}</span></div>
+                <div><span class="k">сигнатура выхода:</span> <span class="v">{_esc(pos.close_sig)}</span></div>
+                <div><span class="k">LVB входа:</span> <span class="v">{_esc(pos.open_last_valid_block_height)}</span></div>
+                <div><span class="k">LVB выхода:</span> <span class="v">{_esc(pos.close_last_valid_block_height)}</span></div>
               </div>
               {errors_block}
               {link_info}
               {entry_block}
               {exit_block}
               <div class="card">
-                <div class="k">События торговли</div>
+                <div class="k">События торговли (по позиции)</div>
                 <ul class="events">
                   {''.join(ev_lines) if ev_lines else '<li>нет событий</li>'}
                 </ul>
@@ -485,6 +493,13 @@ def _render_html(
             </details>
             """
         )
+
+        if pos.state == "CLOSED":
+            closed_blocks.append(block)
+        elif pos.state == "OPEN":
+            open_blocks.append(block)
+        else:
+            other_blocks.append(block)
 
     html_doc = f"""<!doctype html>
 <html lang="ru">
@@ -506,7 +521,7 @@ def _render_html(
     </tbody>
   </table>
 
-  <h2>Профит</h2>
+  <h2>Расчёт прибыли</h2>
   {profit_block}
 
   <h2>Состояния позиций</h2>
@@ -524,8 +539,14 @@ def _render_html(
   <h2>Баланс симуляции</h2>
   {sim_wallet_block}
 
-  <h2>Позиции (детально)</h2>
-  {''.join(position_blocks) if position_blocks else '<div class="muted">Нет позиций</div>'}
+  <h2>Завершённые позиции (CLOSED) — детально</h2>
+  {''.join(closed_blocks) if closed_blocks else '<div class="muted">Нет завершённых позиций</div>'}
+
+  <h2>Открытые позиции (OPEN) — детально</h2>
+  {''.join(open_blocks) if open_blocks else '<div class="muted">Нет открытых позиций</div>'}
+
+  <h2>Прочие позиции (OPENING / CLOSING / FAILED)</h2>
+  {''.join(other_blocks) if other_blocks else '<div class="muted">Нет прочих позиций</div>'}
 </body>
 </html>
 """
