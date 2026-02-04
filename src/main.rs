@@ -25,7 +25,8 @@ const SOLANA_RPC_WS_URL: &str =
     "wss://mainnet.helius-rpc.com/?api-key=ef131ba9-5495-460f-9d12-06515001f5ed";
 const SOLANA_TRADE_RPC_HTTP_URL: &str =
     "https://mainnet.helius-rpc.com/?api-key=d83804d1-9c0c-4de0-8d42-f85c8e39f897";
-const TRADE_EXEC_MODE: trade::ExecMode = trade::ExecMode::Simulate;
+//const TRADE_EXEC_MODE: trade::ExecMode = trade::ExecMode::Simulate;
+const TRADE_EXEC_MODE: trade::ExecMode = trade::ExecMode::Live;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
