@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod signal;
+pub mod swap;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -1665,14 +1666,15 @@ impl Trader {
         let wsol_ata_exists =
             ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
-        let swap = build_swap_instructions(
+        let swap = swap::open_long(
             rpc,
             &self.payer,
             whirlpool,
-            SwapType::ExactIn,
             usdc_mint,
+            wsol_mint,
             usdc_amount_base,
             slippage_bps,
+            wsol_ata_exists,
         )
         .await?;
         let SwapInstructions {
@@ -2054,14 +2056,15 @@ impl Trader {
         let wsol_ata_exists =
             ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
-        let swap = build_swap_instructions(
+        let swap = swap::close_long(
             rpc,
             &self.payer,
             whirlpool,
-            SwapType::ExactIn,
+            usdc_mint,
             wsol_mint,
             sol_position,
             slippage_bps,
+            wsol_ata_exists,
         )
         .await?;
         let SwapInstructions {
@@ -2382,14 +2385,15 @@ impl Trader {
         let wsol_ata_exists =
             ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
-        let swap = build_swap_instructions(
+        let swap = swap::open_short(
             rpc,
             &self.payer,
             whirlpool,
-            SwapType::ExactOut,
             usdc_mint,
+            wsol_mint,
             usdc_out_base,
             slippage_bps,
+            wsol_ata_exists,
         )
         .await?;
         let SwapInstructions {
@@ -2766,14 +2770,15 @@ impl Trader {
         let wsol_ata_exists =
             ensure_wsol_ata_is_safe_to_use_and_close(rpc, &wsol_ata, wsol_program).await?;
 
-        let swap = build_swap_instructions(
+        let swap = swap::close_short(
             rpc,
             &self.payer,
             whirlpool,
-            SwapType::ExactOut,
+            usdc_mint,
             wsol_mint,
             sol_position,
             slippage_bps,
+            wsol_ata_exists,
         )
         .await?;
         let SwapInstructions {
