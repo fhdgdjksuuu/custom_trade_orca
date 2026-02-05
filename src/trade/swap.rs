@@ -26,6 +26,10 @@ use spl_token_2022::state::Mint as Token2022Mint;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::time::sleep;
+
+const RPC_RETRY_ATTEMPTS: usize = 3;
+const RPC_RETRY_DELAY_MS: u64 = 200;
 
 struct PoolData {
     address: Pubkey,
@@ -50,12 +54,20 @@ fn log_rpc_error<E: std::fmt::Debug>(method: &str, details: &str, err: &E) {
 async fn rpc_get_account(rpc: &RpcClient, address: &Pubkey, purpose: &str) -> Result<Account> {
     let details = format!("{} адрес={}", purpose, address);
     log_rpc_request("get_account", &details);
-    rpc.get_account(address)
-        .await
-        .map_err(|err| {
-            log_rpc_error("get_account", &details, &err);
-            anyhow!(format!("{:?}", err))
-        })
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=RPC_RETRY_ATTEMPTS {
+        match rpc.get_account(address).await {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                log_rpc_error("get_account", &details, &err);
+                last_err = Some(anyhow!(format!("{:?}", err)));
+                if attempt < RPC_RETRY_ATTEMPTS {
+                    sleep(std::time::Duration::from_millis(RPC_RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("unknown get_account error")))
         .with_context(|| format!("RPC get_account: {}", details))
 }
 
@@ -76,12 +88,20 @@ async fn rpc_get_multiple_accounts(
         list
     );
     log_rpc_request("get_multiple_accounts", &details);
-    rpc.get_multiple_accounts(addresses)
-        .await
-        .map_err(|err| {
-            log_rpc_error("get_multiple_accounts", &details, &err);
-            anyhow!(format!("{:?}", err))
-        })
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=RPC_RETRY_ATTEMPTS {
+        match rpc.get_multiple_accounts(addresses).await {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                log_rpc_error("get_multiple_accounts", &details, &err);
+                last_err = Some(anyhow!(format!("{:?}", err)));
+                if attempt < RPC_RETRY_ATTEMPTS {
+                    sleep(std::time::Duration::from_millis(RPC_RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("unknown get_multiple_accounts error")))
         .with_context(|| format!("RPC get_multiple_accounts: {}", details))
 }
 
