@@ -1007,17 +1007,17 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
                                 last_error = ?2
                             WHERE player = ?3 AND signature = ?4
                             "#,
-                            params![now_ms(), err.to_string(), event.player, event.signature],
+                            params![now_ms(), format!("{:?}", err), event.player, event.signature],
                         )
                         .unwrap_or(0);
                     if updated == 0 {
                         eprintln!(
-                            "❌ Ошибка без записи: player={} sig={} err={}",
+                            "❌ Ошибка без записи: player={} sig={} err={:?}",
                             event.player, event.signature, err
                         );
                     } else {
                         eprintln!(
-                            "❌ Ошибка обработки: player={} sig={} err={}",
+                            "❌ Ошибка обработки: player={} sig={} err={:?}",
                             event.player, event.signature, err
                         );
                     }
@@ -1117,17 +1117,17 @@ pub async fn run_from_signals(
                             last_error = ?2
                         WHERE player = ?3 AND signature = ?4
                         "#,
-                        params![now_ms(), err.to_string(), event.player, event.signature],
+                        params![now_ms(), format!("{:?}", err), event.player, event.signature],
                     )
                     .unwrap_or(0);
                 if updated == 0 {
                     eprintln!(
-                        "❌ Ошибка без записи: player={} sig={} err={}",
+                        "❌ Ошибка без записи: player={} sig={} err={:?}",
                         event.player, event.signature, err
                     );
                 } else {
                     eprintln!(
-                        "❌ Ошибка обработки: player={} sig={} err={}",
+                        "❌ Ошибка обработки: player={} sig={} err={:?}",
                         event.player, event.signature, err
                     );
                 }

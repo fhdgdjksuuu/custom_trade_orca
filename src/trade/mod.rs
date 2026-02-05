@@ -1380,7 +1380,9 @@ async fn swap_instructions_with_retry(
         Some(slippage_bps),
         Some(signer),
     )
-    .await;
+    .await
+    .map_err(|e| anyhow!(format!("{:?}", e)))
+    .context("orca swap_instructions (attempt 1)");
     match first {
         Ok(swap) => Ok(swap),
         Err(first_err) => {
@@ -1394,13 +1396,14 @@ async fn swap_instructions_with_retry(
                 Some(slippage_bps),
                 Some(signer),
             )
-            .await;
+            .await
+            .map_err(|e| anyhow!(format!("{:?}", e)))
+            .context("orca swap_instructions (attempt 2)");
             match second {
                 Ok(swap) => Ok(swap),
-                Err(second_err) => Err(anyhow!(
-                    "orca swap_instructions failed after retry: {} | {}",
-                    format_orca_swap_error(first_err.as_ref()),
-                    format_orca_swap_error(second_err.as_ref())
+                Err(second_err) => Err(second_err).context(format!(
+                    "orca swap_instructions failed after retry; first_error={:?}",
+                    first_err
                 )),
             }
         }

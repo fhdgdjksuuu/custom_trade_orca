@@ -8,46 +8,24 @@ use orca_whirlpools_core::{
     ExactInSwapQuote, ExactOutSwapQuote, TICK_ARRAY_SIZE, TickArrayFacade, TickFacade,
     get_tick_array_start_tick_index, swap_quote_by_input_token, swap_quote_by_output_token,
 };
-use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_program_pack::Pack;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
+    account::Account,
+    epoch_info::EpochInfo,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{Keypair, Signature, Signer},
+    signature::{Keypair, Signer},
     system_instruction,
-    transaction::Transaction,
 };
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use spl_token::instruction::{close_account as close_account_spl, sync_native};
 use spl_token_2022::extension::transfer_fee::TransferFeeConfig;
 use spl_token_2022::extension::{BaseStateWithExtensions, StateWithExtensions};
-use spl_token_2022::state::{Account as Token2022Account, Mint as Token2022Mint};
+use spl_token_2022::state::Mint as Token2022Mint;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Clone)]
-pub struct TradeConfig {
-    pub rpc_url: String,
-    pub pool: Pubkey,
-    pub amount_in_lamports: u64,
-    pub slippage_bps: u16,
-    pub wallet_path: String,
-}
-
-#[derive(Debug)]
-pub struct TradeOutcome {
-    pub signature: Signature,
-    pub output_mint: Pubkey,
-    pub output_token_program: Pubkey,
-    pub output_ata: Pubkey,
-}
-
-#[derive(Deserialize)]
-struct Wallet(Vec<u8>);
 
 struct PoolData {
     address: Pubkey,
@@ -61,230 +39,73 @@ struct TickSelection {
     facades: [TickArrayFacade; 5],
 }
 
-pub async fn buy_token(cfg: &TradeConfig) -> Result<TradeOutcome> {
-    println!("Загрузка кошелька для покупки");
-    let payer = load_wallet(&cfg.wallet_path)?;
-    println!("Кошелёк загружен {}", payer.pubkey());
-    let rpc = RpcClient::new_with_commitment(cfg.rpc_url.clone(), CommitmentConfig::confirmed());
-
-    let pool = fetch_pool(&rpc, cfg.pool).await?;
-
-    let (_input_mint, output_mint, input_vault, output_vault, a_to_b) =
-        resolve_direction_sol(&pool, true)?;
-
-    let wsol_ata = get_associated_token_address_with_program_id(
-        &payer.pubkey(),
-        &spl_token::native_mint::ID,
-        &spl_token::ID,
-    );
-    let output_ata = get_associated_token_address_with_program_id(
-        &payer.pubkey(),
-        &output_mint,
-        pool.mint_programs
-            .get(&output_mint)
-            .ok_or_else(|| anyhow!("Не найден токен программ для {}", output_mint))?,
-    );
-
-    let create_wsol_ata = create_associated_token_account_idempotent(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &spl_token::native_mint::ID,
-        &spl_token::ID,
-    );
-    let fund_wsol =
-        system_instruction::transfer(&payer.pubkey(), &wsol_ata, cfg.amount_in_lamports);
-    let sync_wsol_ix = sync_native(&spl_token::ID, &wsol_ata)?;
-    let create_output_ata = create_associated_token_account_idempotent(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &output_mint,
-        pool.mint_programs
-            .get(&output_mint)
-            .ok_or_else(|| anyhow!("Не найден токен программ для {}", output_mint))?,
-    );
-
-    let tick_arrays = derive_tick_arrays(&pool.address, &pool.whirlpool, a_to_b, &rpc).await?;
-
-    let oracle = fetch_oracle_optional(&rpc, &pool).await?;
-    let quote = quote_exact_in(
-        &rpc,
-        &pool,
-        &tick_arrays,
-        cfg.amount_in_lamports,
-        a_to_b,
-        cfg.slippage_bps,
-        oracle,
-    )
-    .await?;
-
-    let ix = build_swap_instruction(
-        &pool,
-        &tick_arrays,
-        cfg.amount_in_lamports,
-        quote.token_min_out,
-        true,
-        a_to_b,
-        &payer.pubkey(),
-        &wsol_ata,
-        &output_ata,
-        input_vault,
-        output_vault,
-    )?;
-
-    let close_wsol = close_account_spl(
-        &spl_token::ID,
-        &wsol_ata,
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &[],
-    )?;
-
-    let mut instructions = vec![
-        create_wsol_ata,
-        fund_wsol,
-        sync_wsol_ix,
-        create_output_ata,
-        ix,
-    ];
-    instructions.push(close_wsol);
-
-    let sig = send_tx(&rpc, &mut instructions, &payer).await?;
-
-    Ok(TradeOutcome {
-        signature: sig,
-        output_mint,
-        output_token_program: *pool
-            .mint_programs
-            .get(&output_mint)
-            .ok_or_else(|| anyhow!("Не найден токен программ для {}", output_mint))?,
-        output_ata,
-    })
+fn log_rpc_request(method: &str, details: &str) {
+    println!("RPC запрос: {} | {}", method, details);
 }
 
-pub async fn sell_all(cfg: &TradeConfig, buy_outcome: &TradeOutcome) -> Result<Signature> {
-    println!("Загрузка кошелька для продажи");
-    let payer = load_wallet(&cfg.wallet_path)?;
-    println!("Кошелёк загружен {}", payer.pubkey());
-    let rpc = RpcClient::new_with_commitment(cfg.rpc_url.clone(), CommitmentConfig::confirmed());
-
-    let pool = fetch_pool(&rpc, cfg.pool).await?;
-
-    let (input_mint, _output_mint, input_vault, output_vault, a_to_b) =
-        resolve_direction_sol(&pool, false)?;
-    if input_mint != buy_outcome.output_mint {
-        return Err(anyhow!("Минт для продажи не совпадает с купленным"));
-    }
-
-    let token_ata = buy_outcome.output_ata;
-    let wsol_ata = get_associated_token_address_with_program_id(
-        &payer.pubkey(),
-        &spl_token::native_mint::ID,
-        &spl_token::ID,
-    );
-
-    let token_balance =
-        fetch_token_balance(&rpc, &token_ata, &buy_outcome.output_token_program).await?;
-    if token_balance == 0 {
-        return Err(anyhow!("На счёте нет токенов для продажи"));
-    }
-
-    let ensure_token_ata = create_associated_token_account_idempotent(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &input_mint,
-        &buy_outcome.output_token_program,
-    );
-    let ensure_wsol_ata = create_associated_token_account_idempotent(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &spl_token::native_mint::ID,
-        &spl_token::ID,
-    );
-
-    let tick_arrays = derive_tick_arrays(&pool.address, &pool.whirlpool, a_to_b, &rpc).await?;
-
-    let oracle = fetch_oracle_optional(&rpc, &pool).await?;
-    let quote = quote_exact_in(
-        &rpc,
-        &pool,
-        &tick_arrays,
-        token_balance,
-        a_to_b,
-        cfg.slippage_bps,
-        oracle,
-    )
-    .await?;
-
-    let ix = build_swap_instruction(
-        &pool,
-        &tick_arrays,
-        token_balance,
-        quote.token_min_out,
-        true,
-        a_to_b,
-        &payer.pubkey(),
-        &token_ata,
-        &wsol_ata,
-        input_vault,
-        output_vault,
-    )?;
-
-    let close_token_ix = if buy_outcome.output_token_program == spl_token::ID {
-        close_account_spl(
-            &spl_token::ID,
-            &token_ata,
-            &payer.pubkey(),
-            &payer.pubkey(),
-            &[],
-        )?
-    } else {
-        spl_token_2022::instruction::close_account(
-            &buy_outcome.output_token_program,
-            &token_ata,
-            &payer.pubkey(),
-            &payer.pubkey(),
-            &[],
-        )?
-    };
-
-    let close_wsol_ix = close_account_spl(
-        &spl_token::ID,
-        &wsol_ata,
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &[],
-    )?;
-
-    let mut instructions = vec![
-        ensure_token_ata,
-        ensure_wsol_ata,
-        ix,
-        close_token_ix,
-        close_wsol_ix,
-    ];
-
-    send_tx(&rpc, &mut instructions, &payer).await
+fn log_rpc_error<E: std::fmt::Debug>(method: &str, details: &str, err: &E) {
+    eprintln!("RPC ошибка: {} | {} | причина={:?}", method, details, err);
 }
 
-fn load_wallet(path: &str) -> Result<Keypair> {
-    let raw = std::fs::read_to_string(path).context("Не удалось прочитать wallet.json")?;
-    let wallet: Wallet =
-        serde_json::from_str(&raw).context("wallet.json не является массивом байт")?;
-    let bytes: Vec<u8> = wallet.0;
-    let keypair = Keypair::from_bytes(&bytes).context("Некорректные байты ключа в wallet.json")?;
-    Ok(keypair)
+async fn rpc_get_account(rpc: &RpcClient, address: &Pubkey, purpose: &str) -> Result<Account> {
+    let details = format!("{} адрес={}", purpose, address);
+    log_rpc_request("get_account", &details);
+    rpc.get_account(address)
+        .await
+        .map_err(|err| {
+            log_rpc_error("get_account", &details, &err);
+            err
+        })
+        .with_context(|| format!("RPC get_account: {}", details))
+}
+
+async fn rpc_get_multiple_accounts(
+    rpc: &RpcClient,
+    addresses: &[Pubkey],
+    purpose: &str,
+) -> Result<Vec<Option<Account>>> {
+    let list = addresses
+        .iter()
+        .map(|addr| addr.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let details = format!(
+        "{} количество={} адреса=[{}]",
+        purpose,
+        addresses.len(),
+        list
+    );
+    log_rpc_request("get_multiple_accounts", &details);
+    rpc.get_multiple_accounts(addresses)
+        .await
+        .map_err(|err| {
+            log_rpc_error("get_multiple_accounts", &details, &err);
+            err
+        })
+        .with_context(|| format!("RPC get_multiple_accounts: {}", details))
+}
+
+async fn rpc_get_epoch_info(rpc: &RpcClient, purpose: &str) -> Result<EpochInfo> {
+    let details = purpose.to_string();
+    log_rpc_request("get_epoch_info", &details);
+    rpc.get_epoch_info()
+        .await
+        .map_err(|err| {
+            log_rpc_error("get_epoch_info", &details, &err);
+            err
+        })
+        .with_context(|| format!("RPC get_epoch_info: {}", details))
 }
 
 async fn fetch_pool(rpc: &RpcClient, address: Pubkey) -> Result<PoolData> {
-    let data = rpc
-        .get_account(&address)
+    let data = rpc_get_account(rpc, &address, "загрузка пула")
         .await
         .with_context(|| format!("Не удалось загрузить пул {}", address))?;
     let whirlpool = Whirlpool::from_bytes(&data.data)
         .map_err(|e| anyhow!("Ошибка десериализации пула {}: {}", address, e))?;
 
     let mints = vec![whirlpool.token_mint_a, whirlpool.token_mint_b];
-    let mint_accounts = rpc.get_multiple_accounts(&mints).await?;
+    let mint_accounts = rpc_get_multiple_accounts(rpc, &mints, "загрузка минтов пула").await?;
     let mut mint_programs = HashMap::new();
     for (mint, acc) in mints.iter().zip(mint_accounts.iter()) {
         let info = acc
@@ -298,57 +119,6 @@ async fn fetch_pool(rpc: &RpcClient, address: Pubkey) -> Result<PoolData> {
         whirlpool,
         mint_programs,
     })
-}
-
-fn resolve_direction_sol(
-    pool: &PoolData,
-    buy: bool,
-) -> Result<(Pubkey, Pubkey, Pubkey, Pubkey, bool)> {
-    let sol_mint = spl_token::native_mint::ID;
-    let is_a_sol = pool.whirlpool.token_mint_a == sol_mint;
-    let is_b_sol = pool.whirlpool.token_mint_b == sol_mint;
-    if !is_a_sol && !is_b_sol {
-        return Err(anyhow!("В пуле нет SOL mint, two-hop не используется"));
-    }
-    if buy {
-        // SOL -> token
-        if is_a_sol {
-            Ok((
-                sol_mint,
-                pool.whirlpool.token_mint_b,
-                pool.whirlpool.token_vault_a,
-                pool.whirlpool.token_vault_b,
-                true,
-            ))
-        } else {
-            Ok((
-                sol_mint,
-                pool.whirlpool.token_mint_a,
-                pool.whirlpool.token_vault_b,
-                pool.whirlpool.token_vault_a,
-                false,
-            ))
-        }
-    } else {
-        // token -> SOL
-        if is_a_sol {
-            Ok((
-                pool.whirlpool.token_mint_b,
-                sol_mint,
-                pool.whirlpool.token_vault_b,
-                pool.whirlpool.token_vault_a,
-                false,
-            ))
-        } else {
-            Ok((
-                pool.whirlpool.token_mint_a,
-                sol_mint,
-                pool.whirlpool.token_vault_a,
-                pool.whirlpool.token_vault_b,
-                true,
-            ))
-        }
-    }
 }
 
 async fn derive_tick_arrays(
@@ -385,7 +155,8 @@ async fn derive_tick_arrays(
         .collect::<Result<Vec<_>, _>>()
         .context("Ошибка вычисления адресов tick array")?;
 
-    let account_infos = rpc.get_multiple_accounts(&addresses).await?;
+    let account_infos =
+        rpc_get_multiple_accounts(rpc, &addresses, "загрузка tick array").await?;
     let mut facades: [TickArrayFacade; 5] = [
         empty_tick(all_indexes[0]),
         empty_tick(all_indexes[1]),
@@ -428,11 +199,16 @@ async fn quote_exact_in(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let epoch = rpc.get_epoch_info().await?.epoch;
+    let epoch = rpc_get_epoch_info(rpc, "получение текущей эпохи")
+        .await?
+        .epoch;
 
-    let mint_infos = rpc
-        .get_multiple_accounts(&[pool.whirlpool.token_mint_a, pool.whirlpool.token_mint_b])
-        .await?;
+    let mint_infos = rpc_get_multiple_accounts(
+        rpc,
+        &[pool.whirlpool.token_mint_a, pool.whirlpool.token_mint_b],
+        "загрузка минтов для расчета комиссии",
+    )
+    .await?;
     let transfer_fee_a = extract_transfer_fee(mint_infos[0].as_ref(), epoch);
     let transfer_fee_b = extract_transfer_fee(mint_infos[1].as_ref(), epoch);
 
@@ -465,11 +241,16 @@ async fn quote_exact_out(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let epoch = rpc.get_epoch_info().await?.epoch;
+    let epoch = rpc_get_epoch_info(rpc, "получение текущей эпохи")
+        .await?
+        .epoch;
 
-    let mint_infos = rpc
-        .get_multiple_accounts(&[pool.whirlpool.token_mint_a, pool.whirlpool.token_mint_b])
-        .await?;
+    let mint_infos = rpc_get_multiple_accounts(
+        rpc,
+        &[pool.whirlpool.token_mint_a, pool.whirlpool.token_mint_b],
+        "загрузка минтов для расчета комиссии",
+    )
+    .await?;
     let transfer_fee_a = extract_transfer_fee(mint_infos[0].as_ref(), epoch);
     let transfer_fee_b = extract_transfer_fee(mint_infos[1].as_ref(), epoch);
 
@@ -494,7 +275,7 @@ async fn fetch_oracle_optional(rpc: &RpcClient, pool: &PoolData) -> Result<Optio
         return Ok(None);
     }
     let oracle_addr = get_oracle_address(&pool.address)?.0;
-    let oracle_info = rpc.get_account(&oracle_addr).await?;
+    let oracle_info = rpc_get_account(rpc, &oracle_addr, "загрузка оракула").await?;
     Ok(Some(Oracle::from_bytes(&oracle_info.data)?))
 }
 
@@ -561,20 +342,6 @@ fn build_swap_instruction(
     Ok(ix)
 }
 
-async fn fetch_token_balance(rpc: &RpcClient, ata: &Pubkey, program: &Pubkey) -> Result<u64> {
-    let account = rpc
-        .get_account(ata)
-        .await
-        .with_context(|| format!("Не удалось получить счёт {}", ata))?;
-    if *program == spl_token::ID {
-        let parsed = spl_token::state::Account::unpack(&account.data)?;
-        Ok(parsed.amount)
-    } else {
-        let parsed = StateWithExtensions::<Token2022Account>::unpack(&account.data)?;
-        Ok(parsed.base.amount)
-    }
-}
-
 fn extract_transfer_fee(
     mint_info: Option<&solana_sdk::account::Account>,
     epoch: u64,
@@ -590,25 +357,6 @@ fn extract_transfer_fee(
         fee_bps: fee.transfer_fee_basis_points.into(),
         max_fee: fee.maximum_fee.into(),
     })
-}
-
-async fn send_tx(
-    rpc: &RpcClient,
-    instructions: &mut Vec<Instruction>,
-    payer: &Keypair,
-) -> Result<Signature> {
-    let blockhash = rpc.get_latest_blockhash().await?;
-    let tx = Transaction::new_signed_with_payer(
-        instructions,
-        Some(&payer.pubkey()),
-        &[payer],
-        blockhash,
-    );
-    let sig = rpc
-        .send_and_confirm_transaction(&tx)
-        .await
-        .context("Ошибка отправки транзакции")?;
-    Ok(sig)
 }
 
 pub async fn open_long(
