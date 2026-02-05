@@ -1,4 +1,4 @@
-﻿#[path = "../trade/mod.rs"]
+#[path = "../trade/mod.rs"]
 mod trade;
 
 use anyhow::{anyhow, Context, Result};
@@ -98,7 +98,11 @@ impl RateLimitedRpcSender {
 
 #[async_trait::async_trait]
 impl RpcSender for RateLimitedRpcSender {
-    async fn send(&self, request: RpcRequest, params: serde_json::Value) -> RpcResult<serde_json::Value> {
+    async fn send(
+        &self,
+        request: RpcRequest,
+        params: serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
         self.limiter.acquire().await;
         self.inner.send(request, params).await
     }
@@ -142,7 +146,11 @@ fn ui_to_amount(ui: &str, decimals: u8) -> Result<u64> {
     if frac_str.len() > decimals_usize {
         return Err(anyhow!("too many decimal places"));
     }
-    let mut frac_val: u64 = if frac_str.is_empty() { 0 } else { frac_str.parse()? };
+    let mut frac_val: u64 = if frac_str.is_empty() {
+        0
+    } else {
+        frac_str.parse()?
+    };
     let pad = decimals_usize - frac_str.len();
     if pad > 0 {
         let pow = 10u64
@@ -204,17 +212,13 @@ fn build_simulation_addresses(payer: &Pubkey, token_accounts: &[Pubkey]) -> Vec<
     addresses
 }
 
-async fn ensure_wsol_ata_is_safe(
-    rpc: &RpcClient,
-    wsol_ata: &Pubkey,
-) -> Result<bool> {
+async fn ensure_wsol_ata_is_safe(rpc: &RpcClient, wsol_ata: &Pubkey) -> Result<bool> {
     let resp = rpc
         .get_account_with_commitment(wsol_ata, trade_commitment())
         .await
         .with_context(|| format!("get_account_with_commitment failed for {wsol_ata}"))?;
     if let Some(acc) = resp.value {
-        let token = TokenAccount::unpack(&acc.data)
-            .context("unpack WSOL token account")?;
+        let token = TokenAccount::unpack(&acc.data).context("unpack WSOL token account")?;
         if token.amount != 0 {
             return Err(anyhow!(
                 "WSOL ATA {} has non-zero balance ({})",
@@ -305,12 +309,13 @@ async fn simulate_swap(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let rpc_url = env::var("SOLANA_TRADE_RPC_HTTP")
-        .unwrap_or_else(|_| DEFAULT_TRADE_RPC_URL.to_string());
+    let rpc_url =
+        env::var("SOLANA_TRADE_RPC_HTTP").unwrap_or_else(|_| DEFAULT_TRADE_RPC_URL.to_string());
     let keypair_path = match env::args().nth(1) {
         Some(path) => path,
-        None => env::var("SOLANA_PAYER_KEYPAIR")
-            .unwrap_or_else(|_| DEFAULT_KEYPAIR_PATH.to_string()),
+        None => {
+            env::var("SOLANA_PAYER_KEYPAIR").unwrap_or_else(|_| DEFAULT_KEYPAIR_PATH.to_string())
+        }
     };
 
     let rpc = build_rate_limited_rpc_client(&rpc_url);
@@ -318,12 +323,9 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow!("failed to read keypair {keypair_path}: {e}"))?;
 
     let pool = Pubkey::from_str(DEFAULT_POOL)?;
-    let pool_account = rpc
-        .get_account(&pool)
-        .await
-        .context("get pool account")?;
-    let whirlpool = Whirlpool::from_bytes(&pool_account.data)
-        .context("decode whirlpool account")?;
+    let pool_account = rpc.get_account(&pool).await.context("get pool account")?;
+    let whirlpool =
+        Whirlpool::from_bytes(&pool_account.data).context("decode whirlpool account")?;
 
     let wsol_mint = Pubkey::from_str(WSOL_MINT)?;
     let (usdc_mint, wsol_mint) = if whirlpool.token_mint_a == wsol_mint {
@@ -350,18 +352,12 @@ async fn main() -> Result<()> {
     };
 
     let payer_pubkey = payer.pubkey();
-    let wsol_ata = get_associated_token_address_with_program_id(
-        &payer_pubkey,
-        &wsol_mint,
-        &spl_token::ID,
-    );
+    let wsol_ata =
+        get_associated_token_address_with_program_id(&payer_pubkey, &wsol_mint, &spl_token::ID);
     let wsol_ata_preexists = ensure_wsol_ata_is_safe(&rpc, &wsol_ata).await?;
 
-    let usdc_ata = get_associated_token_address_with_program_id(
-        &payer_pubkey,
-        &usdc_mint,
-        &usdc_program,
-    );
+    let usdc_ata =
+        get_associated_token_address_with_program_id(&payer_pubkey, &usdc_mint, &usdc_program);
     let mut token_accounts = list_owner_token_accounts(&rpc, &payer_pubkey, &usdc_mint).await?;
     if !token_accounts.contains(&usdc_ata) {
         token_accounts.push(usdc_ata);
@@ -388,7 +384,9 @@ async fn main() -> Result<()> {
         _ => return Err(anyhow!("open_long returned non ExactIn quote")),
     };
 
-    if let Err(err) = simulate_swap(&rpc, &payer, "OPEN_LONG", &open_long, &simulate_addresses).await {
+    if let Err(err) =
+        simulate_swap(&rpc, &payer, "OPEN_LONG", &open_long, &simulate_addresses).await
+    {
         eprintln!("OPEN_LONG failed: {err}");
         failures += 1;
     }
@@ -406,7 +404,9 @@ async fn main() -> Result<()> {
     .await
     .context("close_long")?;
 
-    if let Err(err) = simulate_swap(&rpc, &payer, "CLOSE_LONG", &close_long, &simulate_addresses).await {
+    if let Err(err) =
+        simulate_swap(&rpc, &payer, "CLOSE_LONG", &close_long, &simulate_addresses).await
+    {
         eprintln!("CLOSE_LONG failed: {err}");
         failures += 1;
     }
@@ -429,7 +429,9 @@ async fn main() -> Result<()> {
         _ => return Err(anyhow!("open_short returned non ExactOut quote")),
     };
 
-    if let Err(err) = simulate_swap(&rpc, &payer, "OPEN_SHORT", &open_short, &simulate_addresses).await {
+    if let Err(err) =
+        simulate_swap(&rpc, &payer, "OPEN_SHORT", &open_short, &simulate_addresses).await
+    {
         eprintln!("OPEN_SHORT failed: {err}");
         failures += 1;
     }
@@ -447,7 +449,15 @@ async fn main() -> Result<()> {
     .await
     .context("close_short")?;
 
-    if let Err(err) = simulate_swap(&rpc, &payer, "CLOSE_SHORT", &close_short, &simulate_addresses).await {
+    if let Err(err) = simulate_swap(
+        &rpc,
+        &payer,
+        "CLOSE_SHORT",
+        &close_short,
+        &simulate_addresses,
+    )
+    .await
+    {
         eprintln!("CLOSE_SHORT failed: {err}");
         failures += 1;
     }

@@ -895,10 +895,7 @@ async fn try_get_transaction_json(
             Err(err) => {
                 last_error = Some(err.to_string());
                 if attempt < GET_TRANSACTION_RETRY_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        GET_TRANSACTION_RETRY_DELAY_MS,
-                    ))
-                    .await;
+                    tokio::time::sleep(Duration::from_millis(GET_TRANSACTION_RETRY_DELAY_MS)).await;
                 }
             }
         }
@@ -1296,20 +1293,10 @@ async fn execute_tx(
         .context("send_transaction_with_config")?;
 
     loop {
-        let status = match rpc.get_signature_statuses_with_history(&[sig]).await {
-            Ok(resp) => resp.value.get(0).cloned().unwrap_or(None),
-            Err(err) => {
-                eprintln!("RPC недоступен при запросе статуса подписи: {err:?}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-        };
-        if let Some(status) = status {
-            if let Some(err) = status.err {
-                return Err(anyhow!("tx err: {err:?}"));
-            }
-        }
-        let confirmed = match rpc.confirm_transaction_with_commitment(&sig, commitment).await {
+        let confirmed = match rpc
+            .confirm_transaction_with_commitment(&sig, commitment)
+            .await
+        {
             Ok(resp) => resp.value,
             Err(err) => {
                 eprintln!("RPC недоступен при подтверждении транзакции: {err:?}");
@@ -1992,8 +1979,7 @@ impl Trader {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let (tx_json_opt, err_opt) =
-                    try_get_transaction_json(http, &exec.signature).await;
+                let (tx_json_opt, err_opt) = try_get_transaction_json(http, &exec.signature).await;
                 if let Some(tx_json) = tx_json_opt {
                     let parsed = (|| -> Result<(i128, i128)> {
                         let meta = tx_json
@@ -2368,8 +2354,7 @@ impl Trader {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let (tx_json_opt, err_opt) =
-                    try_get_transaction_json(http, &exec.signature).await;
+                let (tx_json_opt, err_opt) = try_get_transaction_json(http, &exec.signature).await;
                 if let Some(tx_json) = tx_json_opt {
                     let parsed = (|| -> Result<(i128, i128)> {
                         let meta = tx_json
@@ -2735,8 +2720,7 @@ impl Trader {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let (tx_json_opt, err_opt) =
-                    try_get_transaction_json(http, &exec.signature).await;
+                let (tx_json_opt, err_opt) = try_get_transaction_json(http, &exec.signature).await;
                 if let Some(tx_json) = tx_json_opt {
                     let parsed = (|| -> Result<(i128, i128)> {
                         let meta = tx_json
@@ -3124,8 +3108,7 @@ impl Trader {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let (tx_json_opt, err_opt) =
-                    try_get_transaction_json(http, &exec.signature).await;
+                let (tx_json_opt, err_opt) = try_get_transaction_json(http, &exec.signature).await;
                 if let Some(tx_json) = tx_json_opt {
                     let parsed = (|| -> Result<(i128, i128)> {
                         let meta = tx_json

@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use orca_whirlpools::{SwapInstructions, SwapQuote, SwapType};
 use orca_whirlpools_client::{
-    AccountsType, Oracle, RemainingAccountsInfo, RemainingAccountsSlice, SwapV2,
-    SwapV2InstructionArgs, TickArray, Whirlpool, get_oracle_address, get_tick_array_address,
+    get_oracle_address, get_tick_array_address, AccountsType, Oracle, RemainingAccountsInfo,
+    RemainingAccountsSlice, SwapV2, SwapV2InstructionArgs, TickArray, Whirlpool,
 };
 use orca_whirlpools_core::{
-    ExactInSwapQuote, ExactOutSwapQuote, TICK_ARRAY_SIZE, TickArrayFacade, TickFacade,
     get_tick_array_start_tick_index, swap_quote_by_input_token, swap_quote_by_output_token,
+    ExactInSwapQuote, ExactOutSwapQuote, TickArrayFacade, TickFacade, TICK_ARRAY_SIZE,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -155,8 +155,7 @@ async fn derive_tick_arrays(
         .collect::<Result<Vec<_>, _>>()
         .context("Ошибка вычисления адресов tick array")?;
 
-    let account_infos =
-        rpc_get_multiple_accounts(rpc, &addresses, "загрузка tick array").await?;
+    let account_infos = rpc_get_multiple_accounts(rpc, &addresses, "загрузка tick array").await?;
     let mut facades: [TickArrayFacade; 5] = [
         empty_tick(all_indexes[0]),
         empty_tick(all_indexes[1]),
@@ -508,11 +507,8 @@ async fn build_manual_swap(
     let payer_pubkey = payer.pubkey();
     let input_ata =
         get_associated_token_address_with_program_id(&payer_pubkey, &input_mint, &input_program);
-    let output_ata = get_associated_token_address_with_program_id(
-        &payer_pubkey,
-        &output_mint,
-        &output_program,
-    );
+    let output_ata =
+        get_associated_token_address_with_program_id(&payer_pubkey, &output_mint, &output_program);
     let wsol_ata =
         get_associated_token_address_with_program_id(&payer_pubkey, &wsol_mint, &wsol_program);
 
