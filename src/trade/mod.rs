@@ -1282,6 +1282,7 @@ async fn execute_tx(
         });
     }
 
+    const FAST_CONFIRM_TIMEOUT_MS: u64 = 5_000;
     let send_cfg = RpcSendTransactionConfig {
         skip_preflight: true,
         preflight_commitment: Some(commitment.commitment),
@@ -1292,26 +1293,35 @@ async fn execute_tx(
         .await
         .context("send_transaction_with_config")?;
 
+    let deadline = Instant::now() + Duration::from_millis(FAST_CONFIRM_TIMEOUT_MS);
     loop {
-        let confirmed = match rpc
-            .confirm_transaction_with_commitment(&sig, commitment)
+        // Быстрая проверка статуса: если исполнитель уже вернул ошибку, прерываемся сразу.
+        match rpc
+            .get_signature_status_with_commitment(&sig, commitment)
             .await
         {
-            Ok(resp) => resp.value,
-            Err(err) => {
-                eprintln!("RPC недоступен при подтверждении транзакции: {err:?}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
+            Ok(Some(result)) => {
+                if let Err(err) = result {
+                    return Err(anyhow!("tx err: {err:?}"));
+                }
+                break;
             }
-        };
-        if confirmed {
-            break;
+            Ok(None) => {
+                // Не найден: повторно отправляем ту же транзакцию без префлайта.
+                if let Err(err) = rpc.send_transaction_with_config(tx, send_cfg).await {
+                    eprintln!("Повторная отправка не удалась: {err:?}");
+                }
+            }
+            Err(err) => {
+                eprintln!("RPC недоступен при запросе статуса подписи: {err:?}");
+            }
         }
+
         let current_height = match rpc.get_block_height().await {
             Ok(height) => height,
             Err(err) => {
                 eprintln!("RPC недоступен при запросе высоты блока: {err:?}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 continue;
             }
         };
@@ -1320,7 +1330,12 @@ async fn execute_tx(
                 "tx not confirmed before last_valid_block_height={last_valid_block_height}"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        if Instant::now() > deadline {
+            return Err(anyhow!(
+                "tx not confirmed before fast timeout {FAST_CONFIRM_TIMEOUT_MS}ms"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     Ok(TxExecution {
