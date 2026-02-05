@@ -54,7 +54,7 @@ async fn rpc_get_account(rpc: &RpcClient, address: &Pubkey, purpose: &str) -> Re
         .await
         .map_err(|err| {
             log_rpc_error("get_account", &details, &err);
-            err
+            anyhow!(format!("{:?}", err))
         })
         .with_context(|| format!("RPC get_account: {}", details))
 }
@@ -80,7 +80,7 @@ async fn rpc_get_multiple_accounts(
         .await
         .map_err(|err| {
             log_rpc_error("get_multiple_accounts", &details, &err);
-            err
+            anyhow!(format!("{:?}", err))
         })
         .with_context(|| format!("RPC get_multiple_accounts: {}", details))
 }
@@ -92,7 +92,7 @@ async fn rpc_get_epoch_info(rpc: &RpcClient, purpose: &str) -> Result<EpochInfo>
         .await
         .map_err(|err| {
             log_rpc_error("get_epoch_info", &details, &err);
-            err
+            anyhow!(format!("{:?}", err))
         })
         .with_context(|| format!("RPC get_epoch_info: {}", details))
 }

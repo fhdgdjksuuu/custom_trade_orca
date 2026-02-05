@@ -307,8 +307,11 @@ async fn simulate_swap(
 async fn main() -> Result<()> {
     let rpc_url = env::var("SOLANA_TRADE_RPC_HTTP")
         .unwrap_or_else(|_| DEFAULT_TRADE_RPC_URL.to_string());
-    let keypair_path = env::var("SOLANA_PAYER_KEYPAIR")
-        .unwrap_or_else(|_| DEFAULT_KEYPAIR_PATH.to_string());
+    let keypair_path = match env::args().nth(1) {
+        Some(path) => path,
+        None => env::var("SOLANA_PAYER_KEYPAIR")
+            .unwrap_or_else(|_| DEFAULT_KEYPAIR_PATH.to_string()),
+    };
 
     let rpc = build_rate_limited_rpc_client(&rpc_url);
     let payer = read_keypair_file(&keypair_path)

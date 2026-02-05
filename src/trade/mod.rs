@@ -41,7 +41,7 @@ use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
@@ -126,16 +126,24 @@ impl RpcRateLimiter {
 }
 
 struct RateLimitedRpcSender {
-    inner: HttpSender,
+    inner: RwLock<Arc<HttpSender>>,
+    url: String,
     limiter: Arc<RpcRateLimiter>,
 }
 
 impl RateLimitedRpcSender {
     fn new(url: String, limiter: Arc<RpcRateLimiter>) -> Self {
         Self {
-            inner: HttpSender::new(url),
+            inner: RwLock::new(Arc::new(HttpSender::new(url.clone()))),
+            url,
             limiter,
         }
+    }
+
+    fn reconnect(&self) {
+        let mut guard = self.inner.write().expect("rpc sender lock");
+        *guard = Arc::new(HttpSender::new(self.url.clone()));
+        eprintln!("RPC переподключение: {}", self.url);
     }
 }
 
@@ -143,15 +151,23 @@ impl RateLimitedRpcSender {
 impl RpcSender for RateLimitedRpcSender {
     async fn send(&self, request: RpcRequest, params: serde_json::Value) -> RpcResult<Value> {
         self.limiter.acquire().await;
-        self.inner.send(request, params).await
+        let sender = self.inner.read().expect("rpc sender lock").clone();
+        let result = sender.send(request, params).await;
+        if result.is_err() {
+            self.reconnect();
+        }
+        result
     }
 
     fn get_transport_stats(&self) -> RpcTransportStats {
-        self.inner.get_transport_stats()
+        self.inner
+            .read()
+            .expect("rpc sender lock")
+            .get_transport_stats()
     }
 
     fn url(&self) -> String {
-        self.inner.url()
+        self.inner.read().expect("rpc sender lock").url()
     }
 }
 
@@ -1536,7 +1552,7 @@ fn ensure_pool_is_wsol_pair(mint_a: Pubkey, mint_b: Pubkey) -> Result<(Pubkey, P
 
 #[allow(dead_code)]
 async fn swap_core(
-    rpc_url: &str,
+    rpc: &RpcClient,
     payer: &Keypair,
     whirlpool: Pubkey,
     swap_type: SwapType,
@@ -1548,14 +1564,8 @@ async fn swap_core(
 ) -> Result<Signature> {
     configure_orca(&payer.pubkey())?;
 
-    let limiter = Arc::new(RpcRateLimiter::new(
-        RPC_RATE_LIMIT_PER_SEC,
-        RPC_RATE_LIMIT_WINDOW,
-    ));
-    let rpc = build_rate_limited_rpc_client(rpc_url, limiter);
-
     let swap = swap_instructions_with_retry(
-        &rpc,
+        rpc,
         whirlpool,
         amount,
         specified_mint,
@@ -1588,7 +1598,7 @@ async fn swap_core(
         recent_blockhash,
     );
 
-    let exec = execute_tx(&rpc, &tx, ExecMode::Live, &[], last_valid_block_height).await?;
+    let exec = execute_tx(rpc, &tx, ExecMode::Live, &[], last_valid_block_height).await?;
     Ok(exec.signature)
 }
 
