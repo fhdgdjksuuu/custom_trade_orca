@@ -51,6 +51,8 @@ const SIMULATION_FEE_LAMPORTS: u64 = 5000;
 const RPC_RATE_LIMIT_PER_SEC: usize = 9;
 const RPC_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 const SWAP_INSTRUCTIONS_RETRY_DELAY_MS: u64 = 500;
+const GET_TRANSACTION_RETRY_ATTEMPTS: usize = 3;
+const GET_TRANSACTION_RETRY_DELAY_MS: u64 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
@@ -537,21 +539,38 @@ impl TradeDb {
         usdc_position_i64: i64,
         sig: Signature,
     ) -> Result<()> {
-        let tx_json = http.get_transaction_json(&sig).await?;
-        let meta = tx_json
-            .get("meta")
-            .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
-        let msg = tx_json
-            .get("transaction")
-            .and_then(|t| t.get("message"))
-            .unwrap_or(&Value::Null);
-
+        let (tx_json_opt, err_opt) = try_get_transaction_json(http, &sig).await;
         let (mint_a, mint_b) = resolve_pool_mints(rpc, pool).await?;
         let (usdc_mint, _wsol_mint) = ensure_pool_is_wsol_pair(mint_a, mint_b)?;
-
-        let sol_delta = owner_lamport_delta(meta, msg, payer)?
-            .ok_or_else(|| anyhow!("payer not found in account keys"))?;
-        let usdc_delta = sum_owner_mint_delta(meta, payer, &usdc_mint)?;
+        let mut tx_meta_error: Option<String> = None;
+        let mut sol_delta: i128 = 0;
+        let mut usdc_delta: i128 = 0;
+        if let Some(tx_json) = tx_json_opt {
+            let parsed = (|| -> Result<(i128, i128)> {
+                let meta = tx_json
+                    .get("meta")
+                    .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
+                let msg = tx_json
+                    .get("transaction")
+                    .and_then(|t| t.get("message"))
+                    .unwrap_or(&Value::Null);
+                let sol_delta = owner_lamport_delta(meta, msg, payer)?
+                    .ok_or_else(|| anyhow!("payer not found in account keys"))?;
+                let usdc_delta = sum_owner_mint_delta(meta, payer, &usdc_mint)?;
+                Ok((sol_delta, usdc_delta))
+            })();
+            match parsed {
+                Ok((sol, usdc)) => {
+                    sol_delta = sol;
+                    usdc_delta = usdc;
+                }
+                Err(err) => {
+                    tx_meta_error = Some(err.to_string());
+                }
+            }
+        } else {
+            tx_meta_error = err_opt;
+        }
 
         let reserved_sol_budget = u64::try_from(reserved_sol_i64).unwrap_or(0);
         let _reserved_usdc_budget = u64::try_from(reserved_usdc_i64).unwrap_or(0);
@@ -598,7 +617,8 @@ impl TradeDb {
                         "reconcile": true,
                         "delta_sol": sol_delta.to_string(),
                         "delta_usdc": usdc_delta.to_string(),
-                        "reserved_sol_lamports": new_reserved_sol
+                        "reserved_sol_lamports": new_reserved_sol,
+                        "tx_meta_error": tx_meta_error
                     }),
                 )?;
             }
@@ -643,7 +663,8 @@ impl TradeDb {
                         "delta_sol": sol_delta.to_string(),
                         "delta_usdc": usdc_delta.to_string(),
                         "reserved_usdc": usdc_received,
-                        "reserved_sol_lamports": reserved_sol_budget
+                        "reserved_sol_lamports": reserved_sol_budget,
+                        "tx_meta_error": tx_meta_error
                     }),
                 )?;
             }
@@ -831,6 +852,28 @@ impl HttpRpc {
             .cloned()
             .ok_or_else(|| anyhow!("getTransaction missing result"))
     }
+}
+
+async fn try_get_transaction_json(
+    http: &HttpRpc,
+    signature: &Signature,
+) -> (Option<Value>, Option<String>) {
+    let mut last_error: Option<String> = None;
+    for attempt in 1..=GET_TRANSACTION_RETRY_ATTEMPTS {
+        match http.get_transaction_json(signature).await {
+            Ok(value) => return (Some(value), None),
+            Err(err) => {
+                last_error = Some(err.to_string());
+                if attempt < GET_TRANSACTION_RETRY_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(
+                        GET_TRANSACTION_RETRY_DELAY_MS,
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    (None, last_error)
 }
 
 fn configure_orca(payer: &Pubkey) -> Result<()> {
@@ -1905,25 +1948,41 @@ impl Trader {
         let mut delta_usdc: i128 = 0;
         let mut post_usdc: Option<u64> = None;
         let mut post_sol: Option<u64> = None;
+        let mut tx_meta_error: Option<String> = None;
 
         match self.mode {
             ExecMode::Live => {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let tx_json = http.get_transaction_json(&exec.signature).await?;
-                let meta = tx_json
-                    .get("meta")
-                    .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
-                let msg = tx_json
-                    .get("transaction")
-                    .and_then(|t| t.get("message"))
-                    .unwrap_or(&Value::Null);
-                let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
-                    .ok_or_else(|| anyhow!("payer not found in account keys"))?;
-                let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
-                delta_sol = sol_delta;
-                delta_usdc = usdc_delta;
+                let (tx_json_opt, err_opt) =
+                    try_get_transaction_json(http, &exec.signature).await;
+                if let Some(tx_json) = tx_json_opt {
+                    let parsed = (|| -> Result<(i128, i128)> {
+                        let meta = tx_json
+                            .get("meta")
+                            .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
+                        let msg = tx_json
+                            .get("transaction")
+                            .and_then(|t| t.get("message"))
+                            .unwrap_or(&Value::Null);
+                        let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
+                            .ok_or_else(|| anyhow!("payer not found in account keys"))?;
+                        let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
+                        Ok((sol_delta, usdc_delta))
+                    })();
+                    match parsed {
+                        Ok((sol_delta, usdc_delta)) => {
+                            delta_sol = sol_delta;
+                            delta_usdc = usdc_delta;
+                        }
+                        Err(err) => {
+                            tx_meta_error = Some(err.to_string());
+                        }
+                    }
+                } else {
+                    tx_meta_error = err_opt;
+                }
             }
             ExecMode::Simulate => {
                 let simulated = exec
@@ -1994,7 +2053,8 @@ impl Trader {
                     "delta_usdc": delta_usdc.to_string(),
                     "sol_position_lamports": sol_position,
                     "reserved_usdc": 0,
-                    "reserved_sol_lamports": reserved_sol_after_open
+                    "reserved_sol_lamports": reserved_sol_after_open,
+                    "tx_meta_error": tx_meta_error
                 }),
             )?;
             db_tx.commit()?;
@@ -2264,25 +2324,41 @@ impl Trader {
         let mut delta_usdc: i128 = 0;
         let mut post_usdc: Option<u64> = None;
         let mut post_sol: Option<u64> = None;
+        let mut tx_meta_error: Option<String> = None;
 
         match self.mode {
             ExecMode::Live => {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let tx_json = http.get_transaction_json(&exec.signature).await?;
-                let meta = tx_json
-                    .get("meta")
-                    .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
-                let msg = tx_json
-                    .get("transaction")
-                    .and_then(|t| t.get("message"))
-                    .unwrap_or(&Value::Null);
-                let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
-                    .ok_or_else(|| anyhow!("payer not found in account keys"))?;
-                let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
-                delta_sol = sol_delta;
-                delta_usdc = usdc_delta;
+                let (tx_json_opt, err_opt) =
+                    try_get_transaction_json(http, &exec.signature).await;
+                if let Some(tx_json) = tx_json_opt {
+                    let parsed = (|| -> Result<(i128, i128)> {
+                        let meta = tx_json
+                            .get("meta")
+                            .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
+                        let msg = tx_json
+                            .get("transaction")
+                            .and_then(|t| t.get("message"))
+                            .unwrap_or(&Value::Null);
+                        let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
+                            .ok_or_else(|| anyhow!("payer not found in account keys"))?;
+                        let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
+                        Ok((sol_delta, usdc_delta))
+                    })();
+                    match parsed {
+                        Ok((sol_delta, usdc_delta)) => {
+                            delta_sol = sol_delta;
+                            delta_usdc = usdc_delta;
+                        }
+                        Err(err) => {
+                            tx_meta_error = Some(err.to_string());
+                        }
+                    }
+                } else {
+                    tx_meta_error = err_opt;
+                }
             }
             ExecMode::Simulate => {
                 let simulated = exec
@@ -2334,7 +2410,8 @@ impl Trader {
                 &json!({
                     "delta_sol": delta_sol.to_string(),
                     "delta_usdc": delta_usdc.to_string(),
-                    "reserved_sol_lamports": 0
+                    "reserved_sol_lamports": 0,
+                    "tx_meta_error": tx_meta_error
                 }),
             )?;
             db_tx.commit()?;
@@ -2614,25 +2691,41 @@ impl Trader {
         let mut delta_usdc: i128 = 0;
         let mut post_usdc: Option<u64> = None;
         let mut post_sol: Option<u64> = None;
+        let mut tx_meta_error: Option<String> = None;
 
         match self.mode {
             ExecMode::Live => {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let tx_json = http.get_transaction_json(&exec.signature).await?;
-                let meta = tx_json
-                    .get("meta")
-                    .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
-                let msg = tx_json
-                    .get("transaction")
-                    .and_then(|t| t.get("message"))
-                    .unwrap_or(&Value::Null);
-                let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
-                    .ok_or_else(|| anyhow!("payer not found in account keys"))?;
-                let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
-                delta_sol = sol_delta;
-                delta_usdc = usdc_delta;
+                let (tx_json_opt, err_opt) =
+                    try_get_transaction_json(http, &exec.signature).await;
+                if let Some(tx_json) = tx_json_opt {
+                    let parsed = (|| -> Result<(i128, i128)> {
+                        let meta = tx_json
+                            .get("meta")
+                            .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
+                        let msg = tx_json
+                            .get("transaction")
+                            .and_then(|t| t.get("message"))
+                            .unwrap_or(&Value::Null);
+                        let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
+                            .ok_or_else(|| anyhow!("payer not found in account keys"))?;
+                        let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
+                        Ok((sol_delta, usdc_delta))
+                    })();
+                    match parsed {
+                        Ok((sol_delta, usdc_delta)) => {
+                            delta_sol = sol_delta;
+                            delta_usdc = usdc_delta;
+                        }
+                        Err(err) => {
+                            tx_meta_error = Some(err.to_string());
+                        }
+                    }
+                } else {
+                    tx_meta_error = err_opt;
+                }
             }
             ExecMode::Simulate => {
                 let simulated = exec
@@ -2707,7 +2800,8 @@ impl Trader {
                     "sol_position_lamports": sol_spent,
                     "usdc_position": usdc_out_base,
                     "reserved_usdc": usdc_out_base,
-                    "reserved_sol_lamports": reserved_sol_after_open
+                    "reserved_sol_lamports": reserved_sol_after_open,
+                    "tx_meta_error": tx_meta_error
                 }),
             )?;
             db_tx.commit()?;
@@ -2986,25 +3080,41 @@ impl Trader {
         let mut delta_usdc: i128 = 0;
         let mut post_usdc: Option<u64> = None;
         let mut post_sol: Option<u64> = None;
+        let mut tx_meta_error: Option<String> = None;
 
         match self.mode {
             ExecMode::Live => {
                 let http = http
                     .as_ref()
                     .ok_or_else(|| anyhow!("http client missing"))?;
-                let tx_json = http.get_transaction_json(&exec.signature).await?;
-                let meta = tx_json
-                    .get("meta")
-                    .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
-                let msg = tx_json
-                    .get("transaction")
-                    .and_then(|t| t.get("message"))
-                    .unwrap_or(&Value::Null);
-                let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
-                    .ok_or_else(|| anyhow!("payer not found in account keys"))?;
-                let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
-                delta_sol = sol_delta;
-                delta_usdc = usdc_delta;
+                let (tx_json_opt, err_opt) =
+                    try_get_transaction_json(http, &exec.signature).await;
+                if let Some(tx_json) = tx_json_opt {
+                    let parsed = (|| -> Result<(i128, i128)> {
+                        let meta = tx_json
+                            .get("meta")
+                            .ok_or_else(|| anyhow!("getTransaction missing meta"))?;
+                        let msg = tx_json
+                            .get("transaction")
+                            .and_then(|t| t.get("message"))
+                            .unwrap_or(&Value::Null);
+                        let sol_delta = owner_lamport_delta(meta, msg, &payer_pubkey)?
+                            .ok_or_else(|| anyhow!("payer not found in account keys"))?;
+                        let usdc_delta = sum_owner_mint_delta(meta, &payer_pubkey, &usdc_mint)?;
+                        Ok((sol_delta, usdc_delta))
+                    })();
+                    match parsed {
+                        Ok((sol_delta, usdc_delta)) => {
+                            delta_sol = sol_delta;
+                            delta_usdc = usdc_delta;
+                        }
+                        Err(err) => {
+                            tx_meta_error = Some(err.to_string());
+                        }
+                    }
+                } else {
+                    tx_meta_error = err_opt;
+                }
             }
             ExecMode::Simulate => {
                 let simulated = exec
@@ -3056,7 +3166,8 @@ impl Trader {
                 &json!({
                     "delta_sol": delta_sol.to_string(),
                     "delta_usdc": delta_usdc.to_string(),
-                    "reserved_usdc": 0
+                    "reserved_usdc": 0,
+                    "tx_meta_error": tx_meta_error
                 }),
             )?;
             db_tx.commit()?;
