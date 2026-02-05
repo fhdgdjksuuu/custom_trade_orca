@@ -429,7 +429,13 @@ impl TradeDb {
                 tx.commit()?;
             }
             ExecMode::Live => {
-                let current_height = rpc.get_block_height().await? as i64;
+                let current_height = match rpc.get_block_height().await {
+                    Ok(height) => Some(height as i64),
+                    Err(err) => {
+                        eprintln!("RPC недоступен при запросе высоты блока: {err:?}");
+                        None
+                    }
+                };
                 for (
                     id,
                     state,
@@ -471,7 +477,13 @@ impl TradeDb {
                         }
                     };
 
-                    let statuses = rpc.get_signature_statuses_with_history(&[sig]).await?.value;
+                    let statuses = match rpc.get_signature_statuses_with_history(&[sig]).await {
+                        Ok(resp) => resp.value,
+                        Err(err) => {
+                            eprintln!("RPC недоступен при запросе статуса подписи: {err:?}");
+                            continue;
+                        }
+                    };
                     let status = statuses.get(0).cloned().unwrap_or(None);
 
                     if let Some(status) = status {
@@ -505,8 +517,10 @@ impl TradeDb {
                     }
 
                     if let Some(last_valid) = last_valid {
-                        if current_height > last_valid {
-                            self.fail_position(id, "blockhash expired", "FAILED_EXPIRED")?;
+                        if let Some(current_height) = current_height {
+                            if current_height > last_valid {
+                                self.fail_position(id, "blockhash expired", "FAILED_EXPIRED")?;
+                            }
                         }
                     }
                 }
@@ -1282,28 +1296,38 @@ async fn execute_tx(
         .context("send_transaction_with_config")?;
 
     loop {
-        let status = rpc
-            .get_signature_statuses_with_history(&[sig])
-            .await
-            .context("get_signature_statuses_with_history")?
-            .value
-            .get(0)
-            .cloned()
-            .unwrap_or(None);
+        let status = match rpc.get_signature_statuses_with_history(&[sig]).await {
+            Ok(resp) => resp.value.get(0).cloned().unwrap_or(None),
+            Err(err) => {
+                eprintln!("RPC недоступен при запросе статуса подписи: {err:?}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         if let Some(status) = status {
             if let Some(err) = status.err {
                 return Err(anyhow!("tx err: {err:?}"));
             }
         }
-        let confirmed = rpc
-            .confirm_transaction_with_commitment(&sig, commitment)
-            .await
-            .context("confirm_transaction_with_commitment")?
-            .value;
+        let confirmed = match rpc.confirm_transaction_with_commitment(&sig, commitment).await {
+            Ok(resp) => resp.value,
+            Err(err) => {
+                eprintln!("RPC недоступен при подтверждении транзакции: {err:?}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         if confirmed {
             break;
         }
-        let current_height = rpc.get_block_height().await.context("get_block_height")?;
+        let current_height = match rpc.get_block_height().await {
+            Ok(height) => height,
+            Err(err) => {
+                eprintln!("RPC недоступен при запросе высоты блока: {err:?}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         if current_height > last_valid_block_height {
             return Err(anyhow!(
                 "tx not confirmed before last_valid_block_height={last_valid_block_height}"
