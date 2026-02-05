@@ -480,7 +480,8 @@ impl TradeDb {
                     let statuses = match rpc.get_signature_statuses_with_history(&[sig]).await {
                         Ok(resp) => resp.value,
                         Err(err) => {
-                            eprintln!("RPC недоступен при запросе статуса подписи: {err:?}");
+                            // Не роняем общий поток: отмечаем позицию для повторной проверки.
+                            self.mark_pending_retry(id, &err.to_string())?;
                             continue;
                         }
                     };
@@ -550,6 +551,28 @@ impl TradeDb {
             id,
             "RECONCILE",
             &json!({"reason": reason, "state": "FAILED"}),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn mark_pending_retry(&self, id: i64, err: &str) -> Result<()> {
+        let mut conn = self.open_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            r#"
+            UPDATE positions
+            SET last_error=?1,
+                updated_at_ms=?2
+            WHERE id=?3
+            "#,
+            params![err, Self::now_ms(), id],
+        )?;
+        TradeDb::insert_event(
+            &tx,
+            id,
+            "RECONCILE",
+            &json!({"reason": "PENDING_RETRY", "state": "UNCHANGED", "error": err}),
         )?;
         tx.commit()?;
         Ok(())
