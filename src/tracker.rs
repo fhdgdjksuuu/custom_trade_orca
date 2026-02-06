@@ -325,7 +325,7 @@ impl Db {
             WHERE whirlpool = ?1
               AND action = 'PRICE_UPDATE'
               AND ts_ms >= ?2
-              AND price <= ?3
+              AND price >= ?3
             ORDER BY ts_ms ASC, id ASC
             LIMIT 1;
         "#
@@ -336,7 +336,7 @@ impl Db {
             WHERE whirlpool = ?1
               AND action = 'PRICE_UPDATE'
               AND ts_ms >= ?2
-              AND price >= ?3
+              AND price <= ?3
             ORDER BY ts_ms ASC, id ASC
             LIMIT 1;
         "#
@@ -1884,15 +1884,17 @@ impl PoolTracker {
                 )
                 .await?;
 
-            // Для позиции на падение цель ниже входа, поэтому условие достижения обратное.
+            // Цена хранится как WSOL per token (SOL/USDC). Для SHORT цель выше входа, для LONG — ниже.
             let is_short = is_short_position(
                 pos.buy_price_wsol_per_token,
                 pos.target_price_wsol_per_token,
             );
             let hit = if is_short {
-                current_price <= pos.target_price_wsol_per_token
-            } else {
+                // SHORT: цена должна вырасти до цели
                 current_price >= pos.target_price_wsol_per_token
+            } else {
+                // LONG: цена должна упасть до цели
+                current_price <= pos.target_price_wsol_per_token
             };
             if hit {
                 to_close.push(pos);
@@ -2503,7 +2505,7 @@ fn profit_pct_from_prices(buy_price: f64, target_price: f64) -> f64 {
 }
 
 fn is_short_position(buy_price: f64, target_price: f64) -> bool {
-    target_price < buy_price
+    target_price > buy_price
 }
 
 async fn restore_open_positions(
