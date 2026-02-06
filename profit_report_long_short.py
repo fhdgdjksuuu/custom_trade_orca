@@ -198,9 +198,9 @@ def _detect_direction(
     if not target_price or entry_price == 0:
         return "unknown"
     if target_price < entry_price:
-        return "short"
-    if target_price > entry_price:
         return "long"
+    if target_price > entry_price:
+        return "short"
     return "unknown"
 
 
