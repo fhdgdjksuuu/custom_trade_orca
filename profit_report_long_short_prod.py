@@ -154,7 +154,7 @@ def generate_report(db_path: str, out_html: str) -> str:
         SELECT pool, side,
                COUNT(*) AS n_positions,
                SUM(CASE WHEN state='CLOSED' THEN 1 ELSE 0 END) AS closed,
-               SUM(CASE WHEN state='OPEN' THEN 1 ELSE 0 END) AS open,
+               SUM(CASE WHEN state IN ('OPENING','OPEN','CLOSING') THEN 1 ELSE 0 END) AS open,
                AVG(CASE WHEN state='CLOSED' THEN profit_pct END) AS avg_profit_pct,
                SUM(CASE WHEN state='CLOSED' AND profit_pct>0 THEN 1 ELSE 0 END) AS win,
                SUM(CASE WHEN state='CLOSED' AND profit_pct<=0 THEN 1 ELSE 0 END) AS lose
