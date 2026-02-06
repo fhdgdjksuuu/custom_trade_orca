@@ -39,6 +39,8 @@ MAX_ROWS_PREVIEW = 500          # per raw table preview
 MAX_FAILED_PREVIEW = 2000       # failed links preview in the "FAILED" section
 MAX_EVENTS_PREVIEW = 200        # last events preview
 
+MAX_DEALS_PREVIEW = 2000       # deals (positions) preview rows
+
 # Unit conventions used by this DB:
 LAMPORTS_PER_SOL = 1_000_000_000
 MICROUSDC_PER_USDC = 1_000_000
@@ -250,6 +252,18 @@ def generate_report(db_path: str, out_html: str) -> str:
         col_desc = ", ".join([f"{c['name']}:{c['type']}" for c in cols])
         schema_rows.append([name, str(len(cols)), col_desc, (sql or "")[:800]])
 
+    # Deals data for report (positions with tx signatures)
+    deals_all = _fetchall_dict(con, f'''
+        SELECT id, payer, pool, side, mode, state, slippage_bps,
+               created_at_ms, updated_at_ms,
+               entry_price, exit_price, profit_pct,
+               open_sig, close_sig
+        FROM positions
+        ORDER BY updated_at_ms DESC
+        LIMIT {MAX_DEALS_PREVIEW};
+    ''')
+
+
     con.close()
 
     # =========================
@@ -403,6 +417,45 @@ summary .hint{color:var(--muted);font-weight:700;font-size:12px;margin-left:8px}
         ],
     )
 
+
+    # Deals tables (positions) with tx signatures for open/close (data fetched earlier as deals_all)
+    def _deal_rows(rows: List[Dict[str, Any]]) -> List[List[Any]]:
+        out: List[List[Any]] = []
+        for r in rows:
+            out.append([
+                r.get("id"),
+                r.get("payer"),
+                r.get("pool"),
+                r.get("side"),
+                r.get("mode"),
+                r.get("state"),
+                r.get("slippage_bps"),
+                _ms_to_dt_str(r.get("created_at_ms")),
+                _ms_to_dt_str(r.get("updated_at_ms")),
+                "" if r.get("entry_price") is None else _fmt_num(r.get("entry_price"), 12),
+                "" if r.get("exit_price") is None else _fmt_num(r.get("exit_price"), 12),
+                "" if r.get("profit_pct") is None else _fmt_num(r.get("profit_pct"), 6),
+                r.get("open_sig") or "",
+                r.get("close_sig") or "",
+            ])
+        return out
+
+    deals_closed = [r for r in deals_all if r.get("state") == "CLOSED"]
+    deals_open = [r for r in deals_all if r.get("state") in ("OPENING", "OPEN", "CLOSING", "PENDING_CLOSE")]
+    deals_failed = [r for r in deals_all if r.get("state") == "FAILED"]
+
+    deals_headers = [
+        "id", "payer", "pool", "side", "mode", "state", "slippage_bps",
+        "created", "updated",
+        "entry_price", "exit_price", "profit_pct",
+        "open_sig (tx)", "close_sig (tx)"
+    ]
+
+    deals_closed_tbl = _render_table(deals_headers, _deal_rows(deals_closed))
+    deals_open_tbl = _render_table(deals_headers, _deal_rows(deals_open))
+    deals_failed_tbl = _render_table(deals_headers, _deal_rows(deals_failed))
+
+
     failed_preview_rows = []
     for r in failed_links[:MAX_FAILED_PREVIEW]:
         failed_preview_rows.append(
@@ -459,6 +512,11 @@ summary .hint{color:var(--muted);font-weight:700;font-size:12px;margin-left:8px}
         )
     raw_all = "\n".join(raw_blocks)
 
+
+    min_len_closed = min(len(deals_closed), MAX_DEALS_PREVIEW)
+    min_len_open = min(len(deals_open), MAX_DEALS_PREVIEW)
+    min_len_failed = min(len(deals_failed), MAX_DEALS_PREVIEW)
+
     html_doc = f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -478,6 +536,7 @@ summary .hint{color:var(--muted);font-weight:700;font-size:12px;margin-left:8px}
       <a href="#kpi">Сводка</a>
       <a href="#statuses">Статусы</a>
       <a href="#profit">Профит</a>
+      <a href="#positions">Сделки</a>
       <a href="#failed">Битые/FAILED</a>
       <a href="#integrity">Целостность</a>
       <a href="#events">События</a>
@@ -524,6 +583,32 @@ summary .hint{color:var(--muted);font-weight:700;font-size:12px;margin-left:8px}
     {by_pool_tbl}
   </div>
 </section>
+
+<section id="positions" class="section">
+  <div class="card">
+    <div class="h2">Сделки (positions) с сигнатурами транзакций</div>
+    <p class="p">Колонки <span class="mono">open_sig</span> и <span class="mono">close_sig</span> — подписи (signature / txhash) Solana-транзакций открытия и закрытия позиции.</p>
+
+    <div class="section">
+      <div class="h3">CLOSED</div>
+      {deals_closed_tbl}
+      <div class="foot">Показаны первые {min_len_closed} записей (лимит: {MAX_DEALS_PREVIEW}).</div>
+    </div>
+
+    <div class="section">
+      <div class="h3">OPEN / OPENING / CLOSING</div>
+      {deals_open_tbl}
+      <div class="foot">Показаны первые {min_len_open} записей (лимит: {MAX_DEALS_PREVIEW}).</div>
+    </div>
+
+    <div class="section">
+      <div class="h3">FAILED</div>
+      {deals_failed_tbl}
+      <div class="foot">Показаны первые {min_len_failed} записей (лимит: {MAX_DEALS_PREVIEW}).</div>
+    </div>
+  </div>
+</section>
+
 
 <section id="failed" class="section">
   <div class="card">
