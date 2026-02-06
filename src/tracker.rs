@@ -3042,9 +3042,9 @@ async fn player_loop(
         // Рост WSOL-хранилища = ставка на рост цены токена (direction="long"),
         // рост другого хранилища = ставка на падение (direction="short").
         let (direction, target_price) = if wsol_delta_vault > 0 && other_delta_vault == 0 {
-            ("long", buy_price * (1.0 + profit_pct))
+            ("long", buy_price * (1.0 - profit_pct))
         } else if other_delta_vault > 0 && wsol_delta_vault == 0 {
-            ("short", buy_price * (1.0 - profit_pct))
+            ("short", buy_price * (1.0 + profit_pct))
         } else {
             log_reject(
                 &db,

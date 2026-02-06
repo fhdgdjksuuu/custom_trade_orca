@@ -349,9 +349,9 @@ fn compute_side(entry: &TrackerEvent) -> Result<&'static str> {
     let target = entry
         .target_price
         .ok_or_else(|| anyhow!("missing target price"))?;
-    if target > price {
+    if target < price {
         Ok("LONG")
-    } else if target < price {
+    } else if target > price {
         Ok("SHORT")
     } else {
         Err(anyhow!("target equals entry price"))
@@ -363,8 +363,8 @@ fn compute_profit_pct(side: &str, entry_price: f64, exit_price: f64) -> Result<f
         return Err(anyhow!("entry price must be positive"));
     }
     match side {
-        "LONG" => Ok((exit_price - entry_price) / entry_price * 100.0),
-        "SHORT" => Ok((entry_price - exit_price) / entry_price * 100.0),
+        "LONG" => Ok((entry_price - exit_price) / entry_price * 100.0),
+        "SHORT" => Ok((exit_price - entry_price) / entry_price * 100.0),
         _ => Err(anyhow!("unknown side {side}")),
     }
 }
