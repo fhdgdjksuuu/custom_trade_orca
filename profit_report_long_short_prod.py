@@ -165,6 +165,8 @@ def generate_report(db_path: str, out_html: str) -> str:
         ORDER BY closed DESC, n_positions DESC;
     """)
 
+    closed_total = _fetchall_dict(con, "SELECT COUNT(*) AS n FROM positions WHERE state='CLOSED';")[0]["n"]
+
     closed_pp = _fetchall_dict(con, "SELECT profit_pct FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL;")
     profs = [r["profit_pct"] for r in closed_pp if r.get("profit_pct") is not None]
     profs_sorted = sorted(profs)
@@ -176,6 +178,7 @@ def generate_report(db_path: str, out_html: str) -> str:
         return profs_sorted[max(0, min(len(profs_sorted) - 1, k))]
 
     profit_stats = {
+        "closed_total": closed_total,
         "closed_positions": len(profs),
         "avg_profit_pct": (sum(profs) / len(profs)) if profs else None,
         "median_profit_pct": statistics.median(profs) if profs else None,
@@ -380,21 +383,31 @@ summary .hint{color:var(--muted);font-weight:700;font-size:12px;margin-left:8px}
         badge=("bad" if len(failed_links) > 0 else "good", "ALERT" if len(failed_links) > 0 else "OK"),
     )
 
-    if profit_stats["closed_positions"]:
-        winrate = profit_stats["wins"] / profit_stats["closed_positions"] * 100.0
-        kpis_html += kpi_card("CLOSED позиций", str(profit_stats["closed_positions"]), sub=f"Win-rate: {winrate:.1f}%")
-        kpis_html += kpi_card(
-            "Profit% avg / median",
-            f"{profit_stats['avg_profit_pct']:.6f} / {profit_stats['median_profit_pct']:.6f}",
-            sub=(
-                f"min={profit_stats['min_profit_pct']:.6f}, "
-                f"p10={profit_stats['p10_profit_pct']:.6f}, "
-                f"p90={profit_stats['p90_profit_pct']:.6f}, "
-                f"max={profit_stats['max_profit_pct']:.6f}"
-            ),
-        )
+    closed_total_i = int(profit_stats.get("closed_total") or 0)
+    known_i = int(profit_stats.get("closed_positions") or 0)
+    missing_i = max(0, closed_total_i - known_i)
+
+    if closed_total_i > 0:
+        if known_i > 0:
+            winrate = profit_stats["wins"] / known_i * 100.0
+            sub = f"Win-rate: {winrate:.1f}%"
+            if missing_i > 0:
+                sub += f" • profit_pct: {known_i}/{closed_total_i} (missing: {missing_i})"
+            kpis_html += kpi_card("CLOSED позиций", str(closed_total_i), sub=sub)
+            kpis_html += kpi_card(
+                "Profit% avg / median",
+                f"{profit_stats['avg_profit_pct']:.6f} / {profit_stats['median_profit_pct']:.6f}",
+                sub=(
+                    f"min={profit_stats['min_profit_pct']:.6f}, "
+                    f"p10={profit_stats['p10_profit_pct']:.6f}, "
+                    f"p90={profit_stats['p90_profit_pct']:.6f}, "
+                    f"max={profit_stats['max_profit_pct']:.6f}"
+                ),
+            )
+        else:
+            kpis_html += kpi_card("CLOSED позиций", str(closed_total_i), sub="profit_pct отсутствует для всех CLOSED позиций")
     else:
-        kpis_html += kpi_card("CLOSED позиций", "0", sub="Нет закрытых позиций с profit_pct")
+        kpis_html += kpi_card("CLOSED позиций", "0", sub="Нет закрытых позиций")
 
     links_status_tbl = _render_table(["status", "count"], [[r["status"], r["n"]] for r in links_status])
     pos_state_tbl = _render_table(["state", "side", "count"], [[r["state"], r["side"], r["n"]] for r in pos_state])
