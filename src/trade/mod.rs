@@ -2276,6 +2276,7 @@ impl Trader {
 
         let mut effective_usdc = 0u64;
         let mut effective_sol = 0u64;
+        let mut available_usdc = 0u64;
         let mut reserved_sol_total = 0u64;
         let mut free_sol = 0u64;
 
@@ -3038,12 +3039,13 @@ impl Trader {
                 &usdc_mint,
             )
             .await?;
-            let (_res_usdc, res_sol) =
+            let (res_usdc, res_sol) =
                 TradeDb::reserved_totals_excluding(&db_tx, &payer_pubkey, position_id)?;
             free_sol = eff_sol.saturating_sub(res_sol);
-            if reserved_usdc < max_usdc_in {
+            let available_usdc = eff_usdc.saturating_sub(res_usdc);
+            if available_usdc < max_usdc_in {
                 return Err(anyhow!(
-                    "reserved_usdc below max_usdc_in: reserved={reserved_usdc} max_usdc_in={max_usdc_in}"
+                    "available_usdc below max_usdc_in: available={available_usdc} max_usdc_in={max_usdc_in}"
                 ));
             }
             if free_sol < fee_plus_rent {
@@ -3085,6 +3087,7 @@ impl Trader {
                 &json!({
                     "effective_usdc": effective_usdc,
                     "effective_sol": effective_sol,
+                    "available_usdc": available_usdc,
                     "reserved_sol_total": reserved_sol_total,
                     "free_sol": free_sol,
                     "reserved_usdc": reserved_usdc,

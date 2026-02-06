@@ -939,6 +939,10 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
     println!("🔌 Узел торговли: {}", rpc_base_url(&cfg.rpc_url));
 
     let trader = build_trader(&cfg)?;
+    trader
+        .db
+        .reconcile_pending(&trader.rpc, cfg.mode, &trader.rpc_limiter)
+        .await?;
     let tracker_conn = open_db(&cfg.tracker_db)?;
     let trade_conn = open_db(&cfg.trade_db)?;
     let players_conn = open_db(&cfg.players_db)?;
@@ -1091,6 +1095,10 @@ pub async fn run_from_signals(
     println!("🔌 Узел торговли: {}", rpc_base_url(&cfg.rpc_url));
 
     let trader = build_trader(&cfg)?;
+    trader
+        .db
+        .reconcile_pending(&trader.rpc, cfg.mode, &trader.rpc_limiter)
+        .await?;
     let tracker_conn = open_db(&cfg.tracker_db)?;
     let trade_conn = open_db(&cfg.trade_db)?;
     let players_conn = open_db(&cfg.players_db)?;

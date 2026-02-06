@@ -165,7 +165,7 @@ def generate_report(db_path: str, out_html: str) -> str:
         ORDER BY closed DESC, n_positions DESC;
     """)
 
-    closed_total = _fetchall_dict(con, "SELECT COUNT(*) AS n FROM positions WHERE state='CLOSED';")[0]["n"]
+    closed_total = sum(r["n"] for r in pos_state if r.get("state") == "CLOSED")
 
     closed_pp = _fetchall_dict(con, "SELECT profit_pct FROM positions WHERE state='CLOSED' AND profit_pct IS NOT NULL;")
     profs = [r["profit_pct"] for r in closed_pp if r.get("profit_pct") is not None]
