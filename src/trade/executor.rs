@@ -997,34 +997,63 @@ pub async fn run_polling(cfg: Config) -> Result<()> {
             };
 
             if let Err(err) = res {
+                let err_text = err.to_string();
+                let is_fast_timeout = err_text.contains("tx not confirmed before fast timeout");
                 if !cfg.dry_run && !event.player.is_empty() && !event.signature.is_empty() {
-                    let updated = trade_conn
-                        .execute(
-                            r#"
-                            UPDATE trade_links
-                            SET status = 'FAILED',
-                                updated_at_ms = ?1,
-                                last_error = ?2
-                            WHERE player = ?3 AND signature = ?4
-                            "#,
-                            params![
-                                now_ms(),
-                                format!("{:?}", err),
-                                event.player,
-                                event.signature
-                            ],
-                        )
-                        .unwrap_or(0);
+                    let updated = if is_fast_timeout && event.action == "TARGET_HIT" {
+                        trade_conn
+                            .execute(
+                                r#"
+                                UPDATE trade_links
+                                SET status = 'CLOSING',
+                                    updated_at_ms = ?1,
+                                    last_error = ?2
+                                WHERE player = ?3 AND signature = ?4
+                                "#,
+                                params![
+                                    now_ms(),
+                                    "ожидаем подтверждение",
+                                    event.player,
+                                    event.signature
+                                ],
+                            )
+                            .unwrap_or(0)
+                    } else {
+                        trade_conn
+                            .execute(
+                                r#"
+                                UPDATE trade_links
+                                SET status = 'FAILED',
+                                    updated_at_ms = ?1,
+                                    last_error = ?2
+                                WHERE player = ?3 AND signature = ?4
+                                "#,
+                                params![
+                                    now_ms(),
+                                    format!("{:?}", err),
+                                    event.player,
+                                    event.signature
+                                ],
+                            )
+                            .unwrap_or(0)
+                    };
                     if updated == 0 {
                         eprintln!(
                             "❌ Ошибка без записи: player={} sig={} err={:?}",
                             event.player, event.signature, err
                         );
                     } else {
-                        eprintln!(
-                            "❌ Ошибка обработки: player={} sig={} err={:?}",
-                            event.player, event.signature, err
-                        );
+                        if is_fast_timeout && event.action == "TARGET_HIT" {
+                            eprintln!(
+                                "⏳ Ожидание подтверждения: player={} sig={}",
+                                event.player, event.signature
+                            );
+                        } else {
+                            eprintln!(
+                                "❌ Ошибка обработки: player={} sig={} err={:?}",
+                                event.player, event.signature, err
+                            );
+                        }
                     }
                 } else {
                     eprintln!("❌ Ошибка обработки события: {:?}", err);
@@ -1112,34 +1141,63 @@ pub async fn run_from_signals(
         };
 
         if let Err(err) = res {
+            let err_text = err.to_string();
+            let is_fast_timeout = err_text.contains("tx not confirmed before fast timeout");
             if !cfg.dry_run && !event.player.is_empty() && !event.signature.is_empty() {
-                let updated = trade_conn
-                    .execute(
-                        r#"
-                        UPDATE trade_links
-                        SET status = 'FAILED',
-                            updated_at_ms = ?1,
-                            last_error = ?2
-                        WHERE player = ?3 AND signature = ?4
-                        "#,
-                        params![
-                            now_ms(),
-                            format!("{:?}", err),
-                            event.player,
-                            event.signature
-                        ],
-                    )
-                    .unwrap_or(0);
+                let updated = if is_fast_timeout && event.action == "TARGET_HIT" {
+                    trade_conn
+                        .execute(
+                            r#"
+                            UPDATE trade_links
+                            SET status = 'CLOSING',
+                                updated_at_ms = ?1,
+                                last_error = ?2
+                            WHERE player = ?3 AND signature = ?4
+                            "#,
+                            params![
+                                now_ms(),
+                                "ожидаем подтверждение",
+                                event.player,
+                                event.signature
+                            ],
+                        )
+                        .unwrap_or(0)
+                } else {
+                    trade_conn
+                        .execute(
+                            r#"
+                            UPDATE trade_links
+                            SET status = 'FAILED',
+                                updated_at_ms = ?1,
+                                last_error = ?2
+                            WHERE player = ?3 AND signature = ?4
+                            "#,
+                            params![
+                                now_ms(),
+                                format!("{:?}", err),
+                                event.player,
+                                event.signature
+                            ],
+                        )
+                        .unwrap_or(0)
+                };
                 if updated == 0 {
                     eprintln!(
                         "❌ Ошибка без записи: player={} sig={} err={:?}",
                         event.player, event.signature, err
                     );
                 } else {
-                    eprintln!(
-                        "❌ Ошибка обработки: player={} sig={} err={:?}",
-                        event.player, event.signature, err
-                    );
+                    if is_fast_timeout && event.action == "TARGET_HIT" {
+                        eprintln!(
+                            "⏳ Ожидание подтверждения: player={} sig={}",
+                            event.player, event.signature
+                        );
+                    } else {
+                        eprintln!(
+                            "❌ Ошибка обработки: player={} sig={} err={:?}",
+                            event.player, event.signature, err
+                        );
+                    }
                 }
             } else {
                 eprintln!("❌ Ошибка обработки события: {:?}", err);

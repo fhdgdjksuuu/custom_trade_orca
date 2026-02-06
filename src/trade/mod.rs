@@ -373,7 +373,8 @@ impl TradeDb {
             r#"
             SELECT id, state, side, payer, pool, open_sig, close_sig,
                    open_last_valid_block_height, close_last_valid_block_height,
-                   reserved_usdc, reserved_sol_lamports, sol_position_lamports, usdc_position
+                   reserved_usdc, reserved_sol_lamports, sol_position_lamports, usdc_position,
+                   updated_at_ms
             FROM positions
             WHERE state IN ('OPENING','CLOSING')
             "#,
@@ -394,6 +395,7 @@ impl TradeDb {
                     row.get::<_, i64>(10)?,
                     row.get::<_, i64>(11)?,
                     row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -406,7 +408,7 @@ impl TradeDb {
             ExecMode::Simulate => {
                 let mut conn = self.open_conn()?;
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                for (id, _, _, _, _, _, _, _, _, _, _, _, _) in &rows {
+                for (id, _, _, _, _, _, _, _, _, _, _, _, _, _) in &rows {
                     tx.execute(
                         r#"
                         UPDATE positions
@@ -450,6 +452,7 @@ impl TradeDb {
                     reserved_sol_i64,
                     sol_pos_i64,
                     usdc_pos_i64,
+                    updated_at_ms,
                 ) in rows
                 {
                     let payer = Pubkey::from_str(&payer_s).unwrap_or_default();
@@ -515,6 +518,45 @@ impl TradeDb {
                             )?;
                         }
                         continue;
+                    }
+
+                    // Отложенная проверка: через 30 секунд после последнего обновления пробуем getTransaction.
+                    let now_ms = Self::now_ms();
+                    if now_ms.saturating_sub(updated_at_ms) >= 30_000 {
+                        let (tx_json_opt, err_opt) = try_get_transaction_json(&http, &sig).await;
+                        if let Some(tx_json) = tx_json_opt {
+                            let meta_err = tx_json
+                                .get("meta")
+                                .and_then(|m| m.get("err"))
+                                .and_then(|v| if v.is_null() { None } else { Some(v) });
+                            if let Some(err_val) = meta_err {
+                                self.fail_position(
+                                    id,
+                                    &format!("tx err: {err_val}"),
+                                    "FAILED_ERR",
+                                )?;
+                            } else if state == "OPENING" {
+                                self.finalize_open_confirmed(
+                                    rpc,
+                                    &http,
+                                    id,
+                                    &payer,
+                                    &pool,
+                                    &side,
+                                    reserved_usdc_i64,
+                                    reserved_sol_i64,
+                                    sol_pos_i64,
+                                    usdc_pos_i64,
+                                    sig,
+                                )
+                                .await?;
+                            } else {
+                                self.finalize_close_confirmed(id, &side, sig)?;
+                            }
+                            continue;
+                        } else if let Some(err) = err_opt {
+                            self.mark_pending_retry(id, &err)?;
+                        }
                     }
 
                     if let Some(last_valid) = last_valid {
@@ -746,6 +788,16 @@ impl TradeDb {
             WHERE id=?3 AND state='CLOSING'
             "#,
             params![sig.to_string(), now, id],
+        )?;
+        tx.execute(
+            r#"
+            UPDATE trade_links
+            SET status='CLOSED',
+                updated_at_ms=?1,
+                last_error=NULL
+            WHERE position_id=?2
+            "#,
+            params![now, id],
         )?;
         let evt = match side {
             "LONG" => {
